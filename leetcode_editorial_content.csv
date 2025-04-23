@@ -1,0 +1,1212 @@
+question_id,editorial_content
+01-matrix,"[TOC]
+
+## Solution
+
+---
+
+### Overview
+
+Whenever you have a matrix where you can move between adjacent cells, you should immediately think about graphs. A matrix is a very common format for a graph to take.
+
+You can treat each square as a node. There are edges between adjacent nodes. Here are some other graph problems that use matrices:
+
+- [Number of Islands](https://leetcode.com/problems/number-of-islands/)
+- [Pacific Atlantic Water Flow](https://leetcode.com/problems/pacific-atlantic-water-flow/)
+- [Max Area of Island](https://leetcode.com/problems/max-area-of-island/)
+- [Number of Enclaves](https://leetcode.com/problems/number-of-enclaves/)
+- [Number of Closed Islands](https://leetcode.com/problems/number-of-closed-islands/)
+
+---
+
+### Approach 1: Breadth-First Search (BFS)
+
+**Intuition**
+
+The first thing you should think about when it comes to shortest path problems on graphs is BFS. If you're not familiar with BFS, we suggest you read the relevant [LeetCode Explore Card](https://leetcode.com/explore/featured/card/graph/620/breadth-first-search-in-graph/).
+
+First of all, any cell with value `0` does not need to be changed. For a given cell with value `1`, we need to find the nearest `0`. We could perform a BFS starting from the cell and terminate once we find any `0`, as this `0` would be the closest one. By repeating this for every cell with value `1`, we would solve the problem.
+
+The issue with this is that the constraints state that the matrix could have up to `10,000` cells. Think about a matrix where the entire matrix is `1` except for one of the corners. We would need to perform $$O(\text{size})$$ BFS, with each BFS costing up to $$O(\text{size})$$. In the worst-case scenario, the number of operations we would need is on the order of `100,000,000`, which would fail the time limit. We need to think of a more efficient way to perform the BFS.
+
+What if we started the BFS from `0` instead of `1`? Let's say that we started a BFS from a `1` and found that the nearest `0` was `x` steps away. Now, let's start a BFS from that `0` until we reach the original `1`. We will again find that the BFS takes `x` steps. Basically, it doesn't matter if we start from the `0` or `1`, both will result in the same distance.
+
+If we start BFS from `1`, we can only find the shortest distance for that `1`. If we start BFS from `0`, we could find the shortest distance for many `1` at a time. So which `0` should we start from? The answer is all of them!
+
+Let's think about how BFS works. From a source node, we first visit all nodes at a distance of `1`. Next, we visit all nodes at a distance of `2`, then `3`, and so on. We can say a node at a distance of x from the source belongs to ""level x"". So the source is at level 0, the neighbors of the source are at level 1, the neighbors of those nodes are at level 2, and so on.
+
+We are used to starting BFS from only one source node, i.e. level 0 only has one node. But there is nothing stopping us from having multiple nodes in level 0. If we start with multiple nodes in level 0, then the nodes in level 1 will be all the neighbors of the nodes in level 0. The nodes in level 2 will be all the neighbors of the nodes in level 1, and so on - the logic is identical. The following animation illustrates this idea (cells are labeled by their level):
+
+!?!../Documents/542.json:960,540!?!
+<br>
+
+As you can see, we don't need to visit any node more than once, which drastically improves our time complexity.
+
+**Algorithm**
+
+1. Create a copy of `mat`, we'll call it `matrix`.
+2. Use a data structure `seen` to mark nodes we have already visited and a `queue` for the BFS.
+3. Put all nodes with `0` into the `queue`. We will also track the level/number of steps with each `queue` entry. Mark these nodes in `seen` as well.
+4. Perform the BFS:
+    - While `queue` is not empty, get the current `row, col, steps` from the `queue`.
+    - Iterate over the 4 directions. For each `nextRow, nextCol`, check if it is in bounds and not already visited in `seen`.
+    - If so, set `matrix[nextRow][nextCol] = steps + 1` and push `nextRow, nextCol, steps + 1` onto the `queue`. Also mark `nextRow, nextCol` in `seen`.
+5. Return `matrix`.
+
+**Implementation**
+
+<iframe src=""https://leetcode.com/playground/dw4gumNm/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""dw4gumNm""></iframe>
+
+**Complexity Analysis**
+
+Given $$m$$ as the number of rows and $$n$$ as the number of columns,
+
+* Time complexity: $$O(m \cdot n)$$
+
+    The BFS never visits a node more than once due to `seen`. Each node has at most 4 neighbors, so the work done at each node is $$O(1)$$. This gives us a time complexity of $$O(m \cdot n)$$, the number of nodes.
+
+* Space complexity: $$O(m \cdot n)$$
+
+    Note: some people may choose to modify the input `mat` instead of creating a copy `matrix` and using `seen`.
+
+    It is generally not considered good practice to modify the input, especially if it's an array as they are passed by reference. Even then, you would only be saving on **auxiliary space** - if you modify the input as part of your algorithm, you still need to count it towards the space complexity.
+
+    We could also elect to not count `matrix` as part of the space complexity as it serves only as the output and the output does not count towards the space complexity if it is not used in any logic during the algorithm.
+
+    There is a lot of nuance when it comes to these decisions and you should always clarify your decisions with the interviewer.
+
+    In our implementation, `seen` and `queue` uses $$O(m \cdot n)$$ space regardless of interpretation, so that is our space complexity.
+    
+<br/>
+
+---
+
+### Approach 2: Dynamic Programming
+
+**Intuition**
+
+Let's say we're currently at `row, col`. What is the minimum distance for this cell? We must have arrived from one of the following:
+
+- `row - 1, col`
+- `row + 1, col`
+- `row, col - 1`
+- `row, col + 1`
+
+Therefore the minimum distance for `row, col` is 1 + the minimum distance from these four neighbors. This gives us a natural recurrence that we can solve using DP:
+
+`dp[row][col] = 1 + min(dp[row - 1][col], dp[row + 1][col], dp[row][col - 1], dp[row][col + 1])`
+
+Where `dp[x][y]` is the minimum distance for the cell `mat[x][y]` and `mat[x][y] != 0`.
+
+The issue with this recurrence is that we don't have an obvious order in which we should iterate over `mat`. We can't just iterate over each cell and check the four directions immediately because the other directions haven't been calculated yet. DP only works with values that have been previously calculated. So how do we calculate `dp`?
+
+Let's pretend that we can only move down and right (not allowed to move up and left). That would change the recurrence. To reach `row, col`, we must have arrived from one of:
+
+- `row - 1, col`
+- `row, col - 1`
+
+So the new recurrence would be:
+
+`dp[row][col] = 1 + min(dp[row - 1][col], dp[row][col - 1])`
+
+If we start at the top left and iterate row by row, column by column, we will correctly calculate `dp` for any paths that move down and right. Now, let's pretend that we can only move up and left (not allowed to move down and right). Again, this would change our recurrence:
+
+`dp[row][col] = 1 + min(dp[row + 1][col], dp[row][col + 1])`
+
+If we start at the bottom right and iterate backward, we will correctly calculate `dp` for any paths that move up and left. Finally, `dp` is the answer!
+
+<details><summary><b>Click here to see proof of this algorithm's correctness if interested</b></summary>
+
+Assume we have a 2x2 matrix: `[a, b], [c, d]`. There are two possibilities:
+
+1. `a = 0`. On the first pass (moving down and right only), we can correctly calculate `dp`.
+2. `a = 1`. One of `b, c, d` must be `0`, since the constraints say there must be at least one `0`. No matter where the `0` is, we can calculate the correct distance for `d`, since it is in the bottom right. Now that we know the answer for `d`, in the second pass, we can calculate the answer for `b, c`, and with that we can calculate the answer of `a`.
+
+Therefore, `a, b, c, d` can always be calculated regardless of their initial values. This logic extends to any size matrix.
+
+</details>
+
+<br>
+
+**Algorithm**
+
+1. Create a copy of `mat`, we'll call it `dp`.
+2. Iterate row by row, column by column. At each `row, col`:
+    - Initialize `minNeighbor` to a large value. This represents the minimum value of `dp` from the cells we could have arrived from.
+    - Making sure to stay in bounds, check the two cells we could have arrived from: `row - 1, col` and `row, col - 1`.
+    - Update `minNeighbor` with their `dp` values.
+    - Set `dp[row][col] = minNeighbor + 1`.
+3. Iterate over `dp` again but in reverse order. At each `row, col`:
+    - Initialize `minNeighbor` to a large value.
+    - Making sure to stay in bounds, check the two cells we could have arrived from: `row + 1, col` and `row, col + 1`.
+    - Update `minNeighbor` with their `dp` values.
+    - If `minNeighbor + 1` is less than `dp[row][col]` (the minimum distance if we only considered down-right paths), then update it.
+4. Return `dp`.
+
+**Implementation**
+
+<iframe src=""https://leetcode.com/playground/bHKXqUcX/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""bHKXqUcX""></iframe>
+
+**Complexity Analysis**
+
+Given $$m$$ as the number of rows and $$n$$ as the number of columns,
+
+* Time complexity: $$O(m \cdot n)$$
+
+    We iterate over $$m \cdot n$$ cells twice, performing constant work at each iteration.
+
+* Space complexity: $$O(m \cdot n)$$
+
+    As discussed above, some people may choose to reuse `mat` as `dp`.
+
+    A common misconception is that it would be $$O(1)$$ space. It would only be $$O(1)$$ **auxiliary space**, but as we are modifying the input and using it in the algorithm, it must be included in the space complexity. Again, it is not considered good practice to modify the input anyways, which is why we are creating `dp`, which uses $$O(m \cdot n)$$ space.
+    
+<br/>
+
+---"
+2-keys-keyboard,"[TOC]
+
+## Solution
+
+---
+
+### Overview
+
+In the problem, we start with one character `A` on our screen. At each step, we can perform one of two operations available:  
+
+1. Copy All: Copy all the A's currently on the screen.  
+2. Paste: Paste all the A's that were copied in the last Copy All operation.  
+
+Given an integer `n`, the goal is to determine the minimum number of operations needed to get exactly `n` A's on the screen.  
+
+### Approach 1: Recursion / Backtracking
+
+### Intuition
+
+When adding A's on the screen to achieve `n` A's, we note that it is unnecessary to apply consecutive Copy All operations because applying consecutive Copy All operations has the same effect as applying just one. If a Copy All operation is applied, then a Paste operation should be applied right after. Thus, we have two options to add A's on the screen at every step:
+
+1) Apply a Copy All operation first and then apply the Paste operation right after.
+2) Apply a Paste operation.
+
+A brute-force approach involves exploring both ways recursively at each step. This would allow us to find all possible sequences of operations that result in exactly `n` A's, and then choose the sequence that requires the minimum number of operations.  
+
+To implement this, we define a function $f(i, j)$, which represents the minimum number of operations needed to get to `n` A's starting with $i$ A's, where the previous copy operation had $j$ A's.
+
+We can break the problem into subproblems based on the two options described above:  
+
+1. **Copy All + Paste**: This option takes 2 operations. It doubles the number of A's to `i * 2`, and updates the previous copy length to `i`. Thus, the number of operations needed for this choice is $2 + f(i * 2, i)$.  
+
+2. **Paste**: This option takes 1 Paste operation. It increases the number of A's by `j` while keeping the previous copy length as `j`. Thus, the number of operations needed for this choice is $1 + f(i + j, j)$.  
+
+By making recursive calls for these two choices — $2 + f(i * 2, i)$  and $1 + f(i + j, j)$ — our solution can return the minimum value among these options, effectively finding the global minimum number of operations needed to reach `n` A's.  
+
+### Algorithm 
+
+1. If `n == 1`, no operations are needed so return `0`.
+2. Define a recursive helper function `minStepsHelper(int currLen, int pasteLen)`:
+    * **Base Case**: If `currLen == n`, then we have reached `n` A's, so return `0`
+    * **Base Case**: If `currLen > n`, then we have exceeded the number of A's needed, so return max value `1000`, ignoring this current sequence
+    * **Try Copy All + Paste**: Initialize `opt1` to `2 + minStepsHelper(currLen * 2, currLen)`, where 2 operations are used, `currLen` is doubled, and `pasteLen` is updated to `currlen`
+    * **Try Paste**: Initialize `opt2` to `1 + minStepsHelper(currLen + pasteLen, pasteLen)`, where 1 operation is used, `currLen` increases by `pasteLen` and `pasteLen` remains the same.
+    * Return the minimum between `opt1` and `opt2`
+3. Return `1 + minStepsHelper(1, 1)`, the minimum number of operations to get to `n` A's from `1` `A`, where `pasteLen` is `1` from performing a Copy All operation first.
+
+
+### Implementation
+
+<iframe src=""https://leetcode.com/playground/8c53DB9n/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""8c53DB9n""></iframe>
+
+### Complexity Analysis
+
+* Time Complexity: $O(2^n)$
+
+    The `minStepsHelper` function is recursively called 2 times at each point. The maximum height of the call stack would be $n$, leading to a total exponential time complexity of $O(2^n)$.
+
+* Space Complexity: $O(n)$
+
+    The space complexity is determined by the call stack, which has a maximum height of $O(n)$.
+
+### Approach 2: Top-Down Dynamic Programming
+
+### Intuition
+
+In Approach 1, certain subproblems $f(i, j)$ can appear more than once, resulting in duplicate calculations. This issue is illustrated by the recursive call tree for `minStepsHelper`, where duplicate calls are highlighted in red.  
+
+![Recursive tree for minStepsHelper](../Figures/650/minsteps_recursive_tree.png)  
+
+To optimize this, we can utilize a technique called [memoization](https://leetcode.com/explore/learn/card/recursion-i/255/recursion-memoization/1495/), which stores previously computed results in a cache. With memoization, we can check if an answer to a subproblem has already been computed, and retrieve the answer from our cache to avoid redundant calculations.  
+
+Our cache can be a 2D array `memo`, where `memo[i][j]` stores the answer to subproblem $f(i, j)$. The dimensions of `memo` can be $(n + 1) \times \left(\frac{n}{2} + 1\right)$, because the current number of characters is at most `n` and the previous copy length is at most $\frac{n}{2}$.  
+
+By employing memoization, we eliminate duplicate work and solve each unique subproblem exactly once, improving the efficiency of our solution.
+
+### Algorithm
+
+1. If `n == 1`, no operations are needed so return `0`.
+2. Initialize cache `memo[i][j]` to 2D array with dimensions `(n + 1) x (n / 2 + 1)`.
+3. Define a recursive helper function `minStepsHelper(int currLen, int pasteLen, int[][] memo)`:
+    * **Base Case**: If `currLen == n`, then we have reached `n` A's, so return `0`
+    * **Base Case**: If `currLen > n`, then we have exceeded the number of A's needed, so return max value `1000`, ignoring this current sequence
+    * **Check cache**: If `memo` has the answer to the subproblem, return `memo[currLen][pasteLen]`.
+    * **Solve subproblem**:
+        * **Try Copy All + Paste**: Initialize `opt1` to `2 + minStepsHelper(currLen * 2, currLen)`, where 2 operations are used, `currLen` is doubled, and `pasteLen` is updated to `currlen`
+        * **Try Paste**: Initialize `opt2` to `1 + minStepsHelper(currLen + pasteLen, pasteLen)`, where 1 operation is used, `currLen` increases by `pasteLen` and `pasteLen` remains the same.
+        * Save the minimum between `opt1` and `opt2` in `memo[currLen][pasteLen]` and return it.
+4. Return `1 + minStepsHelper(1, 1, memo)`, the minimum number of operations to get to `n` A's from `1` `A`, where `pasteLen` is `1` due to performing a Copy All operation first.
+
+### Implementation
+
+<iframe src=""https://leetcode.com/playground/YSMWfomF/shared"" frameBorder=""0"" width=""100%"" height=""497"" name=""YSMWfomF""></iframe>
+
+### Complexity Analysis
+
+* Time Complexity: $O(n^2)$
+
+    The time complexity is determined by the total number of subproblems solved, which is proportional to the size of the `memo` array: $(n + 1) \cdot (n / 2 + 1)$. This leads to a time complexity of $O(n^2)$.
+
+* Space Complexity: $O(n^2)$
+
+    The space complexity is determined by the size of the `memo` array, which is $O(n^2)$.
+
+### Approach 3: Bottom-Up Dynamic Programming 
+
+### Intuition
+
+An alternate approach is to solve our subproblems from bottom to top (bottom-up dynamic programming), by working from the base case up to the final answer. We define a new function $f(i)$ to represent the minimum number of operations to get to $i$ A's starting from 1 A. Note that in contrast to Approaches 1 and 2, we do not keep track of the length of the previous copy. This approach focuses on incrementally building up from the base case $f(1) = 0$ to $f(n)$, the final result.
+
+To do this, we'd like to form a relation between subproblems and express $f(i)$ in terms of $f(j)$ for values of $j$ where $1 \leq j < i$. 
+For a given subproblem $f(i)$ where there are currently `i` A's, we recognize the last operation must have been a paste. Furthermore, we know that the number of A's previously copied must be a factor of $i$. For example, if we currently have $6$ A's, the previous copy could have been of $1$, $2$, or $3$ A's, which are all the factors of $6$.
+
+![3 Ways To Get To AAAAAA](../Figures/650/Three_ways_getting_AAAAAA.png)
+
+ Thus, one possible way to make $i$ A's is to use the Copy All operation on $j$ A's, where $j$ is a factor of $i$. We can then paste the $j$ A's $(i - j)/ j$ times to reach a total of `i` A's. If this approach is chosen, then the minimum number of operations possible would be $f(j) + 1 + (i-j) / j$.  Here, $f(j)$ represents the minimum number of operations to reach $j$ A's, $1$ accounts for the single Copy All operation on the $j$ A's, and $(i-j) / j$ represents the number of additional Paste operations of $j$ A's needed. 
+ 
+ We can simplify the expression $f(j) + 1 + (i-j)/j$ to $f(j) + i/j$.
+
+If we consider all possible factors $j$ of `i`, then we can solve for $f(i)$. Thus, we have the relation:
+
+ $f(i) = f(j) + i/j$ for all $j$ such that $i \mod j == 0$. Note that $j \leq i/2$ since $i/2$ is the largest factor of $i$. 
+
+By iteratively applying this relation, we can build up to compute $f(n)$, effectively solving the problem from the bottom up.
+ 
+### Algorithm
+
+1. Initialize an array `dp` of size `n+1` where $dp[i] =  f(i)$, $1 <= i <= n$
+2. Initialize values of `dp` to a default max value of `1000`
+3. Fill in the base case: `dp[1] = 0`
+4. Iterate through values of `i` from `2` to `n`:
+    * Iterate through values of `j` from `1` to `i/2`:
+        * If `i % j == 0`: Set `dp[i]` to minimum between `dp[i]` and `dp[j] + i / j`.
+
+### Implementation
+
+<iframe src=""https://leetcode.com/playground/QcYr8QWP/shared"" frameBorder=""0"" width=""100%"" height=""412"" name=""QcYr8QWP""></iframe>
+
+### Complexity Analysis
+
+* Time Complexity: $O(n^2)$
+
+    Initializing our `dp` array takes $O(n)$ time. To fill in the `dp` array, the outer and inner loop each run $O(n)$ times, resulting in a total time complexity of $O(n^2)$. 
+
+* Space Complexity: $O(n)$
+
+    The space complexity is determined by our `dp` array, which has a size of $O(n)$. 
+
+### Approach 4: Prime Factorization
+
+### Intuition
+
+> Note: This approach contains some mathematical notation. We encourage you to read carefully to fully understand the intuition.
+
+In Approach 3, we recognize that getting to $i$ A's will repeatedly involve a Copy All operation followed by a series of Paste operations. For example, a possible sequence of operations might look like `[CPP][CPPPP][CP]`. In this approach, we will find a way to minimize the length of each block of this sequence. In doing so, we can find the minimum number of operations needed to achieve `n` A's at the end.
+
+To start, we call the length of the $i-th$ block in this sequence $g_i$. From this setup, We can make two important observations:
+
+1. The total number of operations performed can be expressed as $g_1 + g_2 + ... + g_n$.
+2. After applying $g_1$ operations, we have $g_1$ A's. Then, after applying $g_2$ operations, we have $g_1 \times g_2$ A's. In general, $g_1 \times g_2 \times ... \times g_n = n$.
+
+Thus, to solve the problem, we need to find values for $g_1,g_2, ... , g_n$ so that their sum is minimized while ensuring that their product is equal to `n`.
+
+Let's dive deep on how a certain block's length can be minimized. When examining a block $i$ where its length $g_i$ is composite, (i.e. $g_i = p \times q$), we can break it down into two smaller blocks of size $p$ and $q$. For example, if our first block is $[CPPPPP]$, where $g_i = 3 \times 2$, we can break that down into $[CPP][CP]$. This splitting reduces the total number of operations in this example from 6 to 5, while still producing the same number of A's as the original block. 
+
+Because using $p + q$ moves by splitting is never more than using $p \times q$ moves by not splitting, the optimal strategy involves breaking down each composite $g_i$ into its prime factors. Thus, splitting whenever possible will lead to the minimum number of operations. 
+
+This will lead to each $g_i$ being a prime factor of `n`. This problem then reduces to finding the sum of the prime factors of `n`.
+
+### Algorithm
+
+1. Initialize `ans` to 0, representing the current sum of prime factors
+2. Initialize `d` to 2, the first possible prime factor to consider.
+3. While `n` is not equal to `0`:
+    * **While d is a prime factor:** While `n % d == 0`:
+        * **Divide `n` by the prime factor:** n = n / d
+        * **Add `d` to current sum `ans`:**`ans += d`
+    * **Increment `d` to find the next prime factor:** `d++`
+4. Return `ans`
+
+### Implementation
+
+<iframe src=""https://leetcode.com/playground/854oRmED/shared"" frameBorder=""0"" width=""100%"" height=""344"" name=""854oRmED""></iframe>
+
+### Complexity Analysis
+
+* Time Complexity: $O(\sqrt{n})$
+
+    The outer `while` loop runs until `n` becomes 1. The inner `while` loop divides `n` by `d` whenever `d` is a divisor of `n`.
+    
+    The factorization of `n` involves checking divisibility from `d = 2` to $d \leq \sqrt{n}$. After `d` surpasses $sqrt{n}$, `n` can only have one prime factor greater than $\sqrt{n}$, which will be handled in one iteration of the outer loop.
+
+    Thus, the complexity is dominated by the number of potential divisors up to $\sqrt{n}$, leading to a time complexity of $O(\sqrt{n})$.
+
+* Space Complexity: $O(1)$
+
+    Our iterative algorithm has no recursive overhead and no auxiliary data structures. Thus, the space complexity is $O(1)$."
+24-game,"[TOC]
+
+## Solution
+
+--- 
+
+### Overview
+
+Given an array `cards` containing $$ 4 $$ numbers, we have to check if there is a way to arrange these numbers in a mathematical expression using the operations `['+', '-', '*', '/']` such that the result equals $$ 24 $$.
+
+
+Here, the order of the numbers in the `cards` array does not matter as we have the choice to pick any number and use any operations on them.
+
+What if we generate all the expressions using the given numbers and operators and check whether any expression evaluates to $$ 24 $$?
+
+In problems where we must generate all combinations, recursive backtracking solutions are often a good starting point. If you are not familiar with backtracking, we recommend you to check out the [Backtracking Explore Card](https://leetcode.com/explore/learn/card/recursion-ii/472/backtracking/2654/) to gain a basic understanding of how backtracking algorithms work.
+
+</br>
+
+---
+
+### Approach 1: Backtracking
+
+**Intuition**
+
+> Backtracking can be defined as a general algorithmic technique that considers searching every possible combination to solve a computational problem. It incrementally builds candidates to the solution and abandons a candidate (""backtracks"") when it determines that the candidate cannot lead to the solution. 
+
+![backtrack](../Figures/679/Slide1.PNG)
+
+The problem can be solved as follows:        
+(a) Choose any two numbers from the array and perform a mathematical operation on them. This will result in a new value.           
+(b) Remove the two numbers used in step (a), and replace them with the new value.        
+(c) Repeat steps (a) and (b) with the updated array until the array only contains one number.        
+(d) If this number is $$ 24 $$, then we found a result. Otherwise, we **backtrack** and try selecting the numbers in a different order or using a different permutation of mathematical operations.       
+
+In other words, we will write a recursive backtracking function where we perform a mathematical operation on two numbers and then recursively perform the same operations on the rest of the numbers in the updated array and backtrack if we don't find the solution.        
+
+ <br />
+
+Let's consider how we will build the recursive function. A recursive function consists of two parts:       
+
+**1. Base Case:**           
+
+> A base case is a simple case of the problem that we can answer directly (without using additional recursive calls). The base case is the terminating condition of the recursive search. Any recursive algorithm must have at least one base case. Without this, we would have infinite recursion.
+
+In this approach, we will perform a mathematical operation on two numbers, remove those two numbers, and insert the new result into the array. So with each operation, we decrease the array size by one. When the array size becomes $$ 1 $$, we can't perform any more operations, and this is the final result.
+
+If the final result is $$ 24 $$, return true, as we have found the solution; otherwise, return `false`.
+
+> Note: We will be doing operations on decimal numbers so sometimes we might need to approximate the final result. For example, in cases like [3, 3, 8, 8], here the final equation will be `(8 / (3 - (8 / 3)))` and the result we get is `23.99999999`. <br />
+> This happens due to **rounding error**. Squeezing infinitely long decimal number into a finite number. For example, `8/3 = 2.66666...66`, but we represent it as `2.66666667`, thus due to these minor round offs the final result deviates form the correct result. 
+
+Thus, we choose an epsilon value, which you could consider is the acceptable error for decimal calculations.     
+Now, choosing what will be a correct value for epsilon is totally empirical. The deviation will be minor so even a large value like, 0.1, 0.01, etc, will be fine here.
+
+So, instead of `(array[0] - 24 == 0)`, our base case will be:
+
+```
+if length(array) == 1:
+    # If after all operations result approximates to 24, we return true.
+    return abs(array[0] - 24) <= 0.1
+```
+<br />
+
+**2. Recurrence Relation:**
+
+> This is the step where we define the recursive call for the next recursion and that equation is called a recurrence relation.
+
+In this approach, we perform a mathematical operation on any two numbers from the array, remove those numbers, push the new result in the array and call the recursion using this updated array to perform the same operations on this updated array.
+
+While the recurrence relation is typically represented by a mathematical relation, to make it easier to read, here we will present pseudocode for the recursive function:
+
+```
+for num1 and num2 in array:
+    array.remove(num1)
+    array.remove(num2)
+
+    for each operation in all_operations:
+        array.insert(num1 operation num2)
+
+        # Next Recursive Call
+        # Check if using this updated array we can reach a result of 24.
+        if check_if_res_reached(array):
+            return true
+        
+        # Backtrack steps.
+        array.remove(num1 operation num2)
+    array.insert(num2)
+    array.insert(num1)
+```
+
+<br />
+
+
+**Algorithm**
+
+1. Create a function `generatePossibleResults(a, b)`, which returns an array of results of all possible mathematical operations on two numbers.
+
+2. Create a function `checkIfResultReached(list)`, to check whether we can reach the result $$ 24 $$ using the current array `list`.
+    - First, check for base case conditions. If the array size is $$ 1 $$, return $$ true $$ if the result $$ 24 $$, otherwise return $$ false $$.
+    - If the array size is greater than $$ 1 $$, we choose any two numbers from the $$ list $$, perform all mathematical operations on them, create a new list with updated elements and call the recursive function again using this new list. If we don't reach the result $$ 24 $$ using this new list, we **backtrack**.
+    - After trying all combinations, if none of them results in $$ 24 $$, return $$ false $$.
+
+3. Call the function we created in step 2 (`checkIfResultReached`) with the initial cards list in the original problem.
+
+**Implementation**
+
+
+<iframe src=""https://leetcode.com/playground/MyxkaaTc/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""MyxkaaTc""></iframe>
+
+
+**Complexity Analysis**
+
+If $$N$$ is the number of cards in the input array.
+
+* Time complexity: $$ O(N^{3} \cdot 3^{N - 1} \cdot N! \cdot (N - 1)!) $$.
+
+  - In a time-sensitive interview setting, it may be difficult to provide an exact analysis for this problem. A tighter upper bound likely exists, but the current analysis provides a reasonable upper bound for the time complexity.
+
+  - In each recursive call, if we have $$ k $$ elements in our array, we choose $$ k \cdot (k-1) / 2$$ pairs of numbers and for each pair, we perform $$ 6 $$ operations and for each operation, we make a recursive call.
+
+  - With each recursive call, the array size decreases by $$ 1 $$. Thus, the total number of recursive calls is:           
+  $$ N(N-1)(3) \cdot (N-1)(N-2)(3) \cdot ... \cdot (2)(1)(3) $$ $$ = N! \cdot (N-1)! \cdot 3^{N-1} $$
+
+  ![nodes](../Figures/679/Slide2.PNG)
+
+  - As the number of nodes more than doubles at every level, the total number of nodes can be approximated by the number of nodes in the last level, $$ N! \cdot (N-1)! \cdot 3^{N-1} $$.
+
+  - And the maximum time required for any node will be $$ O( \text{outer\_two\_for\_loops} ) \cdot O( \text{array\_copy + inner\_for\_loop} ) =  O(N(N-1)/2) \cdot O(N + 6) = O(N^{3}) $$
+
+  - So, we can say the time complexity is $$ O(N^{3} \cdot 3^{N - 1} \cdot N! \cdot (N - 1)!) $$.
+
+
+
+* Space complexity: $$O(N^2)$$.
+
+  - At one time, we make at most $$ N $$ recursive calls, and the recursive stack will take $$ O(N) $$ space. 
+
+  - With each recursive call, we create a new array, and the array size decreases by $$ 1 $$ with each call.
+
+  - Thus, space used by new arrays will be $$ O((N-1) + (N-2) + (N-3) + .... + 2 + 1) = O(N^2) $$."
+3sum,"## Video Solution
+---
+
+<lcvideo>
+    <div class=""video-container"">
+        <iframe src=""https://player.vimeo.com/video/842873305"" width=""640"" height=""360"" frameborder=""0"" allow=""autoplay; fullscreen"" allowfullscreen></iframe>
+    </div>
+</lcvideo>
+
+<div>&nbsp;
+</div>
+
+## Solution Article
+
+---
+
+
+This problem is a follow-up of Two Sum, and it is a good idea to first take a look at [Two Sum](https://leetcode.com/articles/two-sum/) and [Two Sum II](https://leetcode.com/articles/two-sum-ii-input-array-is-sorted/). An interviewer may ask to solve Two Sum first, and then throw 3Sum at you. Pay attention to subtle differences in problem description and try to re-use existing solutions!
+
+Two Sum, Two Sum II and 3Sum share a similarity that the sum of elements must match the target exactly. A difference is that, instead of exactly one answer, we need to find all unique triplets that sum to zero.
+
+Before jumping in, let's check the existing solutions and determine the best conceivable runtime (BCR) for 3Sum:
+
+1. [Two Sum](https://leetcode.com/articles/two-sum/) uses a hashmap to find complement values, and therefore achieves $$\mathcal{O}(N)$$ time complexity.
+2. [Two Sum II](https://leetcode.com/articles/two-sum-ii-input-array-is-sorted/) uses the two pointers pattern and also has $$\mathcal{O}(N)$$ time complexity for a sorted array. We can use this approach for any array if we sort it first, which bumps the time complexity to $$\mathcal{O}(n\log{n})$$.
+
+Considering that there is one more dimension in 3Sum, it sounds reasonable to shoot for $$\mathcal{O}(n^2)$$ time complexity as our BCR.
+
+---
+
+### Approach 1: Two Pointers <a name=""approach1""></a>
+
+We will follow the same two pointers pattern as in [Two Sum II](https://leetcode.com/articles/two-sum-ii-input-array-is-sorted/). It requires the array to be sorted, so we'll do that first. As our BCR is $$\mathcal{O}(n^2)$$, sorting the array would not change the overall time complexity.
+
+To make sure the result contains unique triplets, we need to skip duplicate values. It is easy to do because repeating values are next to each other in a sorted array.
+
+> If you are wondering how to solve this problem without sorting the array, go over the [""No-Sort""](#approach3) approach below. There are cases when that approach is preferable, and your interviewer may probe your knowledge there.
+
+After sorting the array, we move our pivot element `nums[i]` and analyze elements to its right. We find all pairs whose sum is equal `-nums[i]` using the two pointers pattern, so that the sum of the pivot element (`nums[i]`) and the pair (`-nums[i]`) is equal to zero.
+
+As a quick refresher, the pointers are initially set to the first and the last element respectively. We compare the sum of these two elements to the target. If it is smaller, we increment the lower pointer `lo`. Otherwise, we decrement the higher pointer `hi`. Thus, the sum always moves toward the target, and we ""prune"" pairs that would move it further away. Again, this works only if the array is sorted. Head to the [Two Sum II](https://leetcode.com/articles/two-sum-ii-input-array-is-sorted/) solution for the detailed explanation.
+
+!?!../Documents/15_3Sum.json:1565,370!?!
+
+**Algorithm**
+
+The implementation is straightforward - we just need to modify `twoSumII` to produce triplets and skip repeating values.
+
+1. For the main function:
+    - Sort the input array `nums`.
+    - Iterate through the array:
+        - If the current value is greater than zero, break from the loop. Remaining values cannot sum to zero.
+        - If the current value is the same as the one before, skip it.
+        - Otherwise, call `twoSumII` for the current position `i`.
+
+2. For `twoSumII` function:
+    - Set the low pointer `lo` to `i + 1`, and high pointer `hi` to the last index.
+    - While low pointer is smaller than high:
+        - If `sum` of `nums[i] + nums[lo] + nums[hi]` is less than zero, increment `lo`.
+        - If `sum` is greater than zero, decrement `hi`.
+        - Otherwise, we found a triplet:
+            - Add it to the result `res`.
+            - Decrement `hi` and increment `lo`.
+            - Increment `lo` while the next value is the same as before to avoid duplicates in the result.
+
+3. Return the result `res`.
+
+<iframe src=""https://leetcode.com/playground/HuiGM9XC/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""HuiGM9XC""></iframe>
+
+**Complexity Analysis**
+
+- Time Complexity: $$\mathcal{O}(n^2)$$. `twoSumII` is $$\mathcal{O}(n)$$, and we call it $$n$$ times.
+
+    Sorting the array takes $$\mathcal{O}(n\log{n})$$, so overall complexity is $$\mathcal{O}(n\log{n} + n^2)$$. This is asymptotically equivalent to $$\mathcal{O}(n^2)$$.
+
+- Space Complexity: from $$\mathcal{O}(\log{n})$$ to $$\mathcal{O}(n)$$, depending on the implementation of the sorting algorithm. For the purpose of complexity analysis, we ignore the memory required for the output.
+
+---
+
+### Approach 2: Hashset
+
+Since triplets must sum up to the target value, we can try the hash table approach from the [Two Sum](https://leetcode.com/articles/two-sum/) solution. This approach won't work, however, if the sum is not necessarily equal to the target, like in [3Sum Smaller](https://leetcode.com/problems/3sum-smaller/) and [3Sum Closest](https://leetcode.com/problems/3sum-closest/).
+
+We move our pivot element `nums[i]` and analyze elements to its right. We find all pairs whose sum is equal `-nums[i]` using the [Two Sum: One-pass Hash Table](https://leetcode.com/articles/two-sum/#approach-3-one-pass-hash-table) approach, so that the sum of the pivot element (`nums[i]`) and the pair (`-nums[i]`) is equal to zero.
+
+To do that, we process each element `nums[j]` to the right of the pivot, and check whether a complement `-nums[i] - nums[j]` is already in the hashset. If it is, we found a triplet. Then, we add `nums[j]` to the hashset, so it can be used as a complement from that point on.
+
+Like in the approach above, we will also sort the array so we can skip repeated values. We provide a different way to avoid duplicates in the [""No-Sort""](#approach3) approach below.
+
+**Algorithm**
+
+The main function is the same as in the [Two Pointers](#approach1) approach above. Here, we use `twoSum` (instead of `twoSumII`), modified to produce triplets and skip repeating values.
+
+1. For the main function:
+    - Sort the input array `nums`.
+    - Iterate through the array:
+        - If the current value is greater than zero, break from the loop. Remaining values cannot sum to zero.
+        - If the current value is the same as the one before, skip it.
+        - Otherwise, call `twoSum` for the current position `i`.
+
+2. For `twoSum` function:
+    - For each index `j > i` in `A`:
+        - Compute `complement` value as `-nums[i] - nums[j]`.
+        - If `complement` exists in hashset `seen`:
+            - We found a triplet - add it to the result `res`.
+            - Increment `j` while the next value is the same as before to avoid duplicates in the result.
+        - Add `nums[j]` to hashset `seen`
+
+3. Return the result `res`.
+
+<iframe src=""https://leetcode.com/playground/fzrg55U6/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""fzrg55U6""></iframe>
+
+- Time Complexity: $$\mathcal{O}(n^2)$$. `twoSum` is $$\mathcal{O}(n)$$, and we call it $$n$$ times.
+
+    Sorting the array takes $$\mathcal{O}(n\log{n})$$, so overall complexity is $$\mathcal{O}(n\log{n} + n^2)$$. This is asymptotically equivalent to $$\mathcal{O}(n^2)$$.
+
+- Space Complexity: $$\mathcal{O}(n)$$ for the hashset.
+
+---
+
+### Approach 3: ""Hash with Triplet Sorting for Duplicate Elimination"" <a name=""approach3""></a>
+
+What if you cannot modify the input array, and you want to avoid copying it due to memory constraints?
+
+We can adapt the hashset approach above to work for an unsorted array. We can put a combination of three values into a hashset to avoid duplicates. Values in a combination should be ordered (e.g. ascending). Otherwise, we can have results with the same values in the different positions.
+
+**Algorithm**
+
+The algorithm is similar to the hashset approach above. We just need to add few optimizations so that it works efficiently for repeated values:
+
+1. Use another hashset `dups` to skip duplicates in the outer loop.
+    - Without this optimization, the submission will time out for the test case with 3,000 zeroes. This case is handled naturally when the array is sorted.
+2. Instead of re-populating a hashset every time in the inner loop, we can use a hashmap and populate it once. Values in the hashmap will indicate whether we have encountered that element in the current iteration. When we process `nums[j]` in the inner loop, we set its hashmap value to `i`. This indicates that we can now use `nums[j]` as a complement for `nums[i]`.
+    - This is more like a trick to compensate for container overheads. The effect varies by language, e.g. for C++ it cuts the runtime in half. Without this trick the submission may time out.
+
+<iframe src=""https://leetcode.com/playground/6jJaqR8N/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""6jJaqR8N""></iframe>
+
+**Complexity Analysis**
+
+- Time Complexity: $$\mathcal{O}(n^2)$$. We have outer and inner loops, each going through $$n$$ elements.
+
+    While the asymptotic complexity is the same, this algorithm is noticeably slower than the previous approach. Lookups in a hashset, though requiring a constant time, are expensive compared to the direct memory access.
+
+- Space Complexity: $$\mathcal{O}(n)$$ for the hashset/hashmap.
+
+    For the purpose of complexity analysis, we ignore the memory required for the output. However, in this approach we also store output in the hashset for deduplication. In the worst case, there could be $$\mathcal{O}(n^2)$$ triplets in the output, like for this example: `[-k, -k + 1, ..., -1, 0, 1, ... k - 1, k]`. Adding a new number to this sequence will produce `n / 3` new triplets.
+
+---
+
+### Further Thoughts
+
+This is a well-known problem with many variations and its own [Wikipedia page](https://en.wikipedia.org/wiki/3SUM).
+
+For an interview, we recommend focusing on the Two Pointers approach above. It's easier to get it right and adapt for other variations of 3Sum. Interviewers love asking follow-up problems like [3Sum Smaller](https://leetcode.com/problems/3sum-smaller/) and [3Sum Closest](https://leetcode.com/problems/3sum-closest/)!"
+4sum,"[TOC]
+
+## Solution
+
+This problem is a follow-up of [3Sum](https://leetcode.com/articles/3sum/), so take a look at that problem first if you haven't. 4Sum and 3Sum are very similar; the difference is that we are looking for unique quadruplets instead of triplets.
+
+As you see, 3Sum just wraps Two Sum in an outer loop. As it iterates through each value `v`, it finds all pairs whose sum is equal to `target - v` using one of these approaches:
+
+1. [Two Sum](https://leetcode.com/articles/two-sum/) uses a hash set to check for a matching value.
+2. [Two Sum II](https://leetcode.com/articles/two-sum-ii-input-array-is-sorted/) uses the two pointers pattern in a sorted array.
+
+Following a similar logic, we can implement 4Sum by wrapping 3Sum in another loop. But wait - there is a catch. If an interviewer asks you to solve 4Sum, they can follow-up with 5Sum, 6Sum, and so on. What they are really expecting at this point is a kSum solution. Therefore, we will focus on a generalized implementation here.
+
+---
+
+### Approach 1: Two Pointers
+
+**Intuition**
+
+The two pointers pattern requires the array to be sorted, so we do that first.  Also, it's easier to deal with duplicates if the array is sorted: repeated values are next to each other and easy to skip.
+
+For 3Sum, we enumerate each value in a single loop, and use the two pointers pattern for the rest of the array. For kSum, we will have `k - 2` nested loops to enumerate all combinations of `k - 2` values.
+
+!?!../Documents/18_4Sum.json:1200,440!?!
+
+**Algorithm**
+
+We can implement `k - 2` loops using a recursion. We will pass the starting point and `k` as the parameters. When `k == 2`, we will call `twoSum`, terminating the recursion.
+
+1. For the main function:
+    - Sort the input array `nums`.
+    - Call `kSum` with `start = 0`, `k = 4`, and `target`, and return the result.
+
+2. For `kSum` function:
+    - At the start of the `kSum` function, we will check three conditions:
+      1. Have we run out of numbers to choose from?
+      2. Is the smallest number remaining greater than `target / k`? <br>If so, then any `k` numbers we choose will be too large.
+      3. Is the largest number remaining smaller than `target / k`? <br>If so, then any `k` numbers we choose will be too small.
+      - If any of these conditions is true, there is no need to continue as no combination of the remaining elements can sum to `target`.
+    - If `k` equals `2`, call `twoSum` and return the result.
+    - Iterate `i` through the array from `start`:
+        - If the current value is the same as the one before, skip it.
+        - Recursively call `kSum` with `start = i + 1`, `k = k - 1`, and `target - nums[i]`.
+        - For each returned `subset` of values:
+            - Include the current value `nums[i]` into `subset`.
+            - Add `subset` to the result `res`.
+    - Return the result `res`.
+
+3. For `twoSum` function:
+    - Set the low pointer `lo` to `start`, and high pointer `hi` to the last index.
+    - While low pointer is smaller than high:
+        - If the sum of `nums[lo]` and `nums[hi]` is less than `target`, increment `lo`.
+            - Also increment `lo` if the value is the same as for `lo - 1`.
+        - If the sum is greater than `target`, decrement `hi`.
+            - Also decrement `hi` if the value is the same as for `hi + 1`.
+        - Otherwise, we found a pair:
+            - Add it to the result `res`.
+            - Decrement `hi` and increment `lo`.
+    - Return the result `res`.
+
+**Implementation**
+
+<iframe src=""https://leetcode.com/playground/mQdTCUXD/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""mQdTCUXD""></iframe>
+
+**Complexity Analysis**
+
+- Time Complexity: $$O(n^{k - 1})$$, or $$O(n^3)$$ for 4Sum. We have $$k - 2$$ loops, and `twoSum` is $$O(n)$$.
+
+    Note that for $$k > 2$$, sorting the array does not change the overall time complexity.
+
+- Space Complexity: $$O(n)$$. We need $$O(k)$$ space for the recursion. $$k$$ can be the same as $$n$$ in the worst case for the generalized algorithm.
+
+    Note that, for the purpose of complexity analysis, we ignore the memory required for the output.
+
+---
+
+### Approach 2: Hash Set
+    
+**Intuition**
+
+Since elements must sum up to the exact target value, we can also use the [Two Sum: One-pass Hash Table](https://leetcode.com/articles/two-sum/#approach-3-one-pass-hash-table) approach.
+
+In [3Sum: Hash Set](https://leetcode.com/articles/3sum/#approach-2-hash-set), we solved the problem without sorting the array. To do that, we needed to sort values within triplets, and track them in a hash set. Doing the same for k values could be impractical.
+
+So, for this approach, we will also sort the array and skip duplicates the same way as in the Two Pointers approach above. Thus, the code will only differ in the `twoSum` implementation.
+
+**Algorithm**
+
+`twoSum` implementation here is almost the same as in [Two Sum: One-pass Hash Table](https://leetcode.com/articles/two-sum/#approach-3-one-pass-hash-table). The only difference is the check to avoid duplicates. Since the array is sorted, we can just compare the found pair with the last one in the result `res`.
+    
+**Implementation**
+
+<iframe src=""https://leetcode.com/playground/oAq3g56d/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""oAq3g56d""></iframe>
+
+**Complexity Analysis**
+
+- Time Complexity: $$O(n^{k - 1})$$, or $$O(n^3)$$ for 4Sum. We have $$k - 2$$ loops iterating over $$n$$ elements, and `twoSum` is $$O(n)$$.
+
+    Note that for $$k > 2$$, sorting the array does not change the overall time complexity.
+
+- Space Complexity: $$O(n)$$ for the hash set. The space needed for the recursion will not exceed $$O(n)$$."
+a-number-after-a-double-reversal,
+accounts-merge,"[TOC]
+
+## Solution
+
+--- 
+
+### Overview
+
+We are given a list of accounts where each account consists of a list containing the name of the person the account belongs to and some emails that belong to the person. One person is allowed to have multiple accounts, but each email can only belong to one person. Therefore, we can say two accounts must belong to the same person if the accounts have an email in common. Note that we cannot just use the user's name to determine which email addresses belong to the same user since different users may have the same name.
+
+Our goal is, for each person, we want to identify all of the emails that belong to that person. Therefore, every time we find two accounts with an email in common, we will merge the two accounts into one.  
+
+Whenever we must work with a set of elements (emails) that are connected (belong to the same user), we should always consider visualizing our input as a graph. In this problem, converting the input into a graph will facilitate the process of ""merging"" two accounts.
+
+Emails can be represented as nodes, and an edge between nodes will signify that they belong to the same person. Since all of the emails in an account belong to the same person, we can connect all of the emails with edges. Thus, each account can be represented by a connected component. What if two accounts have an email in common? Then we can add an edge between the two connected components, effectively merging them into one connected component.  
+</br>
+
+---
+
+### Approach 1: Depth First Search (DFS)
+
+**Intuition**
+
+Here, we will represent emails as nodes, and an edge will signify that two emails are connected and hence belong to the same person. This means that any two emails that are connected by a path of edges must also belong to the same person. Initially, we are given $$N$$ accounts, where each account's emails make up a connected component.  
+
+Our first step should be to ensure that for each account, all of its nodes are connected. Suppose an account has $$K$$ emails, and we want to connect these emails. Since all emails in an account are connected, we can add an edge between every pair of emails. This will create a complete subgraph and require adding $$K \choose 2$$ edges. However, do we really need that many edges to keep track of which emails belong to the same account? No, as long as two emails are connected by a path of edges, we know they belong to the same account. So instead of creating a complete subgraph for each account, we can create an acyclic graph using only $$K - 1$$ edges. Recall that $$K - 1$$ is the minimum number of edges required to connect $$K$$ nodes. In this approach, we will connect emails in an account in a [star](https://en.wikipedia.org/wiki/Star_(graph_theory)) manner with the first email as the internal node of the star and all other emails as the leaves (as shown below).
+
+![fig](../Figures/721/721A.png)
+
+The beauty of connecting the emails in each account in this manner is that after connecting an email to a second account, that email will have one edge going to an email in the first account and one edge going to an email in the second account.  Thereby automatically merging the two accounts. The below slideshow depicts the merging process for four accounts that belong to two different people.
+
+!?!../Documents/721_Accounts_Merge_A.json:960,720!?! <br>
+
+After iterating over each account and connecting the emails as described above, we will have a one or more connected components. Each connected component will represent one person, and the nodes in the connected component are the person's emails. Now our task is to explore each connected component to find all the emails that belong to each person. Since a depth-first search is guaranteed to explore every node in a connected component, we will perform a DFS on each connected component (person) to find all of the connected emails.
+
+To do so, we will iterate over all of the nodes and consider starting a DFS. If the node has already been visited, in an earlier DFS, we will not start a DFS.  Otherwise, perform a DFS traversal over the connected component and store all the visited emails together, as they all belong to one person. Each time we visit an email during a DFS, we will mark it as visited to ensure that we do not search the same connected component more than once. To read more about how DFS can be leveraged to find components you can refer to the first approach [here](https://leetcode.com/problems/number-of-connected-components-in-an-undirected-graph/solution/).
+
+
+**Algorithm**
+
+1. Create an adjacency list: For each account add an edge between the first email (`accountFirstEmail`) and each of the other emails in the account.
+2. Traverse over the accounts; for each account, check if the first email in the account (`accountFirstEmail`) was already visited.  If so, then do not start a new DFS. Otherwise, perform DFS with this email as the source node.
+3. During each DFS, store the traversed emails in an array `mergedAccount`, also mark all these emails as visited.
+4. After the DFS traversal is over, sort the emails and add the account name (`accountName`) at the start of the vector `mergedAccount`.
+5. Store the vector `mergedAccount` in the answer list `mergedAccounts`.
+
+
+**Implementation**
+
+
+<iframe src=""https://leetcode.com/playground/EAjKzRH9/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""EAjKzRH9""></iframe>
+
+
+**Complexity Analysis**
+
+Here $$N$$ is the number of accounts and $$K$$ is the maximum length of an account.
+
+* Time complexity: $$O(NK \log{NK})$$
+
+    In the worst case, all the emails will end up belonging to a single person. The total number of emails will be $$N*K$$, and we need to sort these emails. DFS traversal will take $$NK$$ operations as no email will be traversed more than once.
+
+* Space complexity: $$O(NK)$$
+
+  Building the adjacency list will take $$O(NK)$$ space. In the end, `visited` will contain all of the emails hence it will use $$O(NK)$$ space. Also, the call stack for DFS will use $$O(NK)$$ space in the worst case.
+
+  The space complexity of the sorting algorithm depends on the implementation of each programming language. For instance, in Java, Collections.sort() dumps the specified list into an array this will take $$O(NK)$$ space then Arrays.sort() for primitives is implemented as a variant of quicksort algorithm whose space complexity is $$O(\log NK)$$. In C++ `sort()` function provided by STL is a hybrid of Quick Sort, Heap Sort, and Insertion Sort with the worst-case space complexity of $O(\log NK)$. 
+
+<br/>
+
+---
+
+### Approach 2: Disjoint Set Union (DSU)
+
+**Intuition**
+
+As in the previous approach, the first step is to find which accounts have an email in common and merge them to form a larger connected component. Any problem that involves merging connected components (accounts) is a natural fit for the Disjoint Set Union (DSU) data structure. If you would like to learn more about the DSU data structure (also known as Union-Find), a tutorial is provided in the [Graph Explore Card](https://leetcode.com/explore/featured/card/graph/618/disjoint-set/3881/). Since most implementations of DSU use an array to record the root (representative) of each component, we will use integers to represent each component for ease of operability. Therefore, we will give each account a unique ID, and we will map all the emails in the account to the account's ID. We will use a map, `emailGroup`, to store this information. 
+
+We chose the account index to be the identifier for all the emails of an account. We will assign the account index as the group when we get the email for the first time and when we get an email that we have already traversed, we will merge the current account and the group that we have previously stored in `emailGroup` using union operation.
+
+After traversing over all the accounts, we will find the representative of all the emails which will inform us about their group. Emails with the same representative belong to the same person/group and hence will be stored together. Also, we can retrieve the account name for our final answer using `accountList` as we have `group` which is the index in the original accounts list.
+
+!?!../Documents/721_Accounts_Merge_B.json:960,720!?! <br>
+
+**Algorithm**
+
+1. Traverse over each account, and for each account, traverse over all of its emails.  If we see an email for the first time, then set the group of the email as the index of the current account in `emailGroup` .
+2. Otherwise, if the email has already been seen in another account, then we will union the current group (`i`) and the group the current email belongs to (`emailGroup[email]`).
+3. After traversing over every account and merging the accounts that share a common email, we will now traverse over every email once more. Each email will be added to a map (`components`) where the key is the email's representative, and the value is a list of emails with that representative.
+4. Traverse over `components`, here the keys are the group indices and the value is the list of emails belonging to this group (person). Since the emails must be ""in sorted order"" we will sort the list of emails for each group. Lastly, we can get the account name using the `accountList[group][0]`. In accordance with the instructions, we will insert this name at the beginning of the email list.
+5. Store the list created in step 4 in our final result (`mergedAccount`). 
+
+**Implementation**
+
+
+<iframe src=""https://leetcode.com/playground/cCnGvzFV/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""cCnGvzFV""></iframe>
+
+
+**Complexity Analysis**
+
+Here $$N$$ is the number of accounts and $$K$$ is the maximum length of an account.
+
+* Time complexity: $$O(NK \log {NK})$$
+
+   While merging we consider the size of each connected component and we always choose the representative of the larger component to be the new representative of the smaller component, also we have included the path compression so the time complexity for find/union operation is $$\alpha({N})$$ (Here, $$\alpha({N})$$ is the inverse Ackermann function that grows so slowly, that it doesn't exceed $$4$$ for all reasonable $$N$$ (approximately $$ N < 10^{600}$$).
+
+  We find the representative of all the emails, hence it will take $$O(NK\alpha({N}))$$ time. We are also sorting the components and the worst case will be when all emails end up belonging to the same component this will cost $$O(NK(\log {NK}))$$.
+
+  Hence the total time complexity is $$O(NK \cdot \log {NK} + NK \cdot \alpha({N}))$$.
+
+* Space complexity: $$O(NK)$$
+
+  List `representative`, `size` store information corresponding to each group so will take $$O(N)$$ space. All emails get stored in `emailGroup` and `component` hence space used is $$O(NK)$$.
+
+  The space complexity of the sorting algorithm depends on the implementation of each programming language. For instance, in Java, Collections.sort() dumps the specified list into an array this will take $$O(NK)$$ space then Arrays.sort() for primitives is implemented as a variant of quicksort algorithm whose space complexity is $$O(\log NK)$$. In C++ `sort()` function provided by STL is a hybrid of Quick Sort, Heap Sort, and Insertion Sort with the worst-case space complexity of $O(\log NK)$. 
+<br/>
+
+---"
+add-binary,"[TOC]
+
+## Solution
+
+--- 
+
+### Overview
+
+There is a simple way to use built-in functions:
+
+- Convert a and b into integers.
+
+- Compute the sum.
+
+- Convert the sum back into binary form.
+
+<iframe src=""https://leetcode.com/playground/2AJcyUZu/shared"" frameBorder=""0"" width=""100%"" height=""463"" name=""2AJcyUZu""></iframe>
+
+The overall algorithm has $$\mathcal{O}(N + M)$$ time complexity and has two drawbacks that could be used against you during the interview.
+
+> 1. In Java, this approach is limited by the length of the input strings a and b. Once the string is long enough, the result of conversion into integers will not fit into Integer, Long, or BigInteger:
+
+- 33 1-bits - and b doesn't fit into Integer.
+
+- 65 1-bits - and b doesn't fit into Long.
+
+- [2147483647](https://docs.oracle.com/javase/8/docs/api/java/math/BigInteger.html) 1-bits - and b doesn't fit into BigInteger.
+
+To fix the issue, one could use a standard Bit-by-Bit Computation approach which is suitable for quite long input strings.
+
+> 2. This method has quite low performance in the case of large input numbers. 
+
+One could use the Bit Manipulation approach to speed up the solution. 
+
+
+---
+### Approach 1: Bit-by-Bit Computation
+
+**Algorithm**
+
+That's a good old classical algorithm, and there is no conversion from binary string to decimal and back here. Let's consider the numbers bit by bit starting from the lowest one and compute the carry this bit will add. 
+
+Start from carry = 0. If a number a has 1-bit in this lowest bit, add 1 to the carry. The same is true for number b: if number b has 1-bit in the lowest bit, add 1 to the carry. At this point, the carry for the lowest bit could be equal to $$(00)_2$$, $$(01)_2$$, or $$(10)_2$$.
+
+Now append the lowest bit of the carry to the answer, and move the highest bit of the carry to the next order bit.  
+
+Repeat the same steps again, and again, till all bits in a and b are used up. If there is still nonzero carry to add, add it. Now reverse the answer string and the job is done.
+
+!?!../Documents/67_LIS.json:1000,387!?!
+
+**Implementation**
+
+<iframe src=""https://leetcode.com/playground/GNKizDKH/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""GNKizDKH""></iframe>
+
+**Complexity Analysis**
+
+* Time complexity: $$\mathcal{O}(\max(N, M))$$, where $$N$$ and $$M$$ are lengths of the input strings a and b.
+
+* Space complexity: $$\mathcal{O}(\max(N, M))$$ to keep the answer.
+
+
+---
+### Approach 2: Bit Manipulation
+ 
+**Intuition**
+ 
+Here the input is more adapted to push towards Approach 1, but there is a popular Facebook variation of this problem when the interviewer provides you with two numbers and asks to sum them up without using the addition operation.  
+
+> No addition? OK, bit manipulation then.
+
+How to start? There is an interview tip for bit manipulation problems: if you don't know how to start, start by computing XOR for your input data. Strangely, that helps to go out for quite a lot of problems, [Single Number II](https://leetcode.com/articles/single-number-ii/), [Single Number III](https://leetcode.com/articles/single-number-iii/), [Maximum XOR of Two Numbers in an Array](https://leetcode.com/articles/maximum-xor-of-two-numbers-in-an-array/), [Repeated DNA Sequences](https://leetcode.com/articles/repeated-dna-sequences/), [Maximum Product of Word Lengths](https://leetcode.com/articles/maximum-product-of-word-lengths/), etc.
+
+Here XOR is a key as well because it's a sum of two binaries without taking carry into account.
+
+![fig](../Figures/67/xor4.png) 
+
+To find the current carry is quite easy as well, it's AND of two input numbers, shifted one bit to the left. 
+
+![fig](../Figures/67/carry2.png)
+
+Now the problem is reduced: one has to find the sum of answers without carry and carry. It's the same problem - to sum two numbers, and hence one could solve it in a loop with the condition statement ""while carry is not equal to zero"". 
+
+**Algorithm**
+
+- Convert a and b into integers x and y, x will be used to keep an answer, and y for the carry.
+
+- While carry is nonzero: `y != 0`:
+
+    - Current answer without carry is XOR of x and y: `answer = x^y`.
+    
+    - Current carry is left-shifted AND of x and y: `carry = (x & y) << 1`.
+    
+    - Job is done, prepare the next loop: `x = answer`, `y = carry`.
+    
+- Return x in the binary form.
+
+**Implementation**
+
+<iframe src=""https://leetcode.com/playground/oUnneTbu/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""oUnneTbu""></iframe>
+
+This solution could be written as a 4-liner in Python
+
+```
+class Solution:
+    def addBinary(self, a, b) -> str:
+        x, y = int(a, 2), int(b, 2)
+        while y:
+            x, y = x ^ y, (x & y) << 1
+        return bin(x)[2:]
+```
+
+**Performance Discussion**
+
+Here we deal with input numbers which are greater than $$2^{100}$$. That forces to use slow [BigInteger](https://docs.oracle.com/javase/8/docs/api/java/math/BigInteger.html) in Java, and hence the performance gain will be present for the Python solution only. Provided here Java solution could do its best with Integers or Longs, but not with BigIntegers.
+
+**Complexity Analysis**
+
+* Time complexity: $$\mathcal{O}(N + M)$$, where $$N$$ and $$M$$ are lengths of the input strings a and b.
+
+* Space complexity: $$\mathcal{O}(\max(N, M))$$ to keep the answer."
+add-bold-tag-in-string,"[TOC]
+
+## Solution
+
+---
+
+### Approach: Mark Bold Characters
+
+**Intuition**
+
+First, let's understand the two rules given in the problem description.
+
+1. If two such substrings overlap, you should wrap them together with only one pair of closed bold-tag.
+2. If two substrings wrapped by bold tags are consecutive, you should combine them.
+
+Example of the first rule: given `words = [""aa""]` and `s = ""aaa""`, the substring `""aa""` appears twice. However, the two occurrences overlap - they both use `s[1]`. Therefore, they should be wrapped together as `<b>aaa</b>`.
+
+Example of the second rule: given `words = [""aa"", ""bb""]` and `s = ""aabb""`, both words have a match. However, the matches are adjacent. Therefore, they should be wrapped together as `<b>aabb</b>`.
+
+Now that we understand the rules, let's solve the problem.
+
+If we can figure out which characters in the string need to be bold, then it's relatively easy to add the tags. So how do we figure out which characters should be bold? We can use a boolean array `bold` with the same length as `s`. If `bold[i] = true`, it means that the $$i^{th}$$ character of `s` should be bold.
+
+To calculate this array, we can iterate over each `word` and then iterate over each substring in `s` with the same length of `word`. If the substring matches, then we can set all the indices of the substring to `true` in `bool`.
+
+<iframe src=""https://leetcode.com/playground/asZYtaSQ/shared"" frameBorder=""0"" width=""100%"" height=""327"" name=""asZYtaSQ""></iframe>
+
+For each `word`, we are iterating over all the substrings in `s` with the same length as `word`. If we find a substring matches, we iterate over the indices of the substring using `j` to mark the characters as bold.
+
+This method works, but can we optimize it a little bit? The major programming languages provide built-in functions for finding substrings in a string.
+
+- In Java, we will use `s.indexOf()`
+- In C++, we will use `s.find()`
+- In Python, we will use `s.find()`.
+
+All three of these functions take two arguments (the second one is optional). The first argument is a string. The function will find the first occurrence of this string in `s` and return the index of the first character. For example, given `s = ""abcdefg""`, if we call `s.find(""cde"")`, it will return `2`, since the string `""cde""` occurs in `s` starting at index `2`. If the string does not occur in `s` at all, it will return `-1`.
+
+The optional second argument is an integer. It will only consider `s` starting at this integer. For example, given `s = ""aabbaa""`, if we call `s.find(""aa"")`, we will get `0`. However, if we call `s.find(""aa"", 1)`, we will instead get `4`, because we only consider `s` starting with index `1` (ignore the first character).
+
+As these are built-in methods, they are quite efficient. We can use these methods to find which characters should be bold in a more efficient manner than simply checking all possible substrings.
+
+This is the process we will use for each `word`:
+
+1. Find the `start` index of the first occurrence of `word` in `s` using `s.find(word)` (or `s.indexOf(word)` in Java).
+2. While `start != -1`:
+    - Iterate over the indices of the substring `[start, start + word.length)` and mark them as `true` in `bold`.
+    - After marking all the indices, set `start = s.find(word, start + 1)`. We will look for another occurrence of `word` in `s` that comes after the previous occurrence we found.
+    - If at any point we don't find `word`, then `start` will be set to `-1` and the while loop will exit, and we can move on to the next word.
+
+To summarize, we are using a built-in method to efficiently find the first occurrence of `word` in `s`. We mark all the indices of that occurrence as bold, and then we try to find more occurrences of `word` that come later.
+
+Now that we have calculated `bold`, how do we add the bold tags?
+
+We can iterate over the indices of `s` and at each index `i`, if `bold[i]`:
+- and `bold[i - 1] = false`, then `i` is starting a new bold section. We should add `<b>`.
+- and `bold[i + 1] = false`, then `i` is the end of a bold section. We should add `</b>`.
+
+In between these two checks, we can add `s[i]` to the answer (in case `s[i]` is a single isolated bold character, it needs to be in between the tags). Also, don't forget to be careful about going out of bounds.
+
+**Algorithm**
+
+1. Initialize `n = s.length` and a boolean array `bold` of length `n`, with values initially set to `false`.
+2. Iterate over `words`. For each `word`, use the process described above to mark characters in `bold`:
+    - Set `start = s.find(word)`.
+    - While `start != -1`, iterate `i` from `start` until `start + word.length` and set `bold[i] = true`. Then, set `start = s.find(word, start + 1)`.
+3. Build the answer `ans`. Iterate over the indices of `s` using `i`.
+    - If `bold[i]` and either `i == 0` or `bold[i - 1] == false`, add `<b>` to the answer.
+    - Add `s[i]` to the answer.
+    - If `bold[i]` and either `i == n - 1` or `bold[i + 1] == false`, add `</b>` to the answer.
+4. Return the answer as a string.
+
+> Note: for `ans`, we will use `StringBuilder` in Java and a list in Python to join at the end. This is because strings are immutable in these languages, so simple string concatenation will be inefficient. In C++, strings are mutable, so we can just use `+=`.
+
+**Implementation**
+
+<iframe src=""https://leetcode.com/playground/KmQrmXiz/shared"" frameBorder=""0"" width=""100%"" height=""500"" name=""KmQrmXiz""></iframe>
+
+**Complexity Analysis**
+
+Let $$n$$ be `s.length`, $$m$$ be `words.length`, and $$k$$ be the average length of the words.
+
+The time complexity may differ between languages. It is dependent on how the built-in method is implemented.
+    
+For example, Java's `indexOf()` costs $$O(n \cdot k)$$. The C++ standard doesn't specify implementation details, but some implementations of `find()` may use the [KMP algorithm](https://en.wikipedia.org/wiki/Knuth%E2%80%93Morris%E2%80%93Pratt_algorithm) which can achieve $$O(n + k)$$ or even $$O(n)$$ in certain cases.
+
+For this analysis, we will assume that we are using Java.
+
+* Time complexity: $$O(m \cdot (n^2 \cdot k - n \cdot k ^2))$$
+
+    To calculate `bold`, we iterate over `words`. For each word, we use the built-in string finding method, which costs $$O(n \cdot k)$$. However, we may call it multiple times per word. In the worst case scenario, such as `s = ""aaaaa...aaaaa""` and `word = ""aaaaaa""`, it may be called $$O(n - k)$$ times. Note that this scenario is very rare. In such a case, each `word` could cost us $$O((n - k) \cdot n \cdot k) = O(n^2 \cdot k - n \cdot k^2)$$.
+
+    There are $$m$$ words, which means calculating `bold` could cost $$O(m \cdot (n^2 \cdot k - n \cdot k ^2))$$.
+
+    After calculating `bold`, we create the answer in $$O(n)$$. This work is dominated by the other terms.
+
+* Space complexity: $$O(n)$$
+
+    We use the boolean array `bold` which has a length of `n`.
+    
+<br/>
+
+---"
+add-digits,"[TOC]
+
+---
+
+### Overview
+
+The value we're asked to compute is the so-called [Digital Root](https://en.wikipedia.org/wiki/Digital_root). Logarithmic time solution is easy to write, although the main question here is how to fit into a constant time.
+
+<iframe src=""https://leetcode.com/playground/hvP39Nsq/shared"" frameBorder=""0"" width=""100%"" height=""327"" name=""hvP39Nsq""></iframe>
+
+<br />
+
+---
+
+### Approach 1: Mathematical: Digital Root
+
+**Formula for the Digital Root**
+
+There is a known formula to compute a digital root in a decimal numeral system
+
+$$
+dr_{10}(n) = 0, \qquad \text{if } n = 0 
+$$
+
+$$
+dr_{10}(n) = 9, \qquad \text{if } n = 9 k 
+$$
+
+$$
+dr_{10}(n) = n \mod 9, \qquad \text{if } n \neq 9 k
+$$
+
+How to derive it? Probably, you already know the following proof from school, where it was used for divisibility by 9: ""The original number is divisible by 9 if and only if the sum of its digits is divisible by 9"". Let's revise it briefly. 
+
+The input number could be presented in a standard way, where $$d_0, d_1, .. d_k$$ are digits of n:
+
+$$
+n = d_0 + d_1 \cdot 10^1 + d_2 \cdot 10^2 + ... + d_k \cdot 10^k
+$$
+
+One could expand each power of ten, using the following:
+
+$$
+10 = 9 \cdot 1 + 1 \\ 
+100 = 99 + 1 = 9 \cdot 11 + 1 \\ 
+1000 = 999 + 1 = 9 \cdot 111 + 1 \\
+... \\
+10^k = 1\underbrace{00..0}_\text{k times} = \underbrace{99..9}_\text{k times} + 1 = 9 \cdot \underbrace{11..1}_\text{k times} + 1
+$$
+
+That results in 
+
+$$
+n = d_0 + d_1 \cdot (9 \cdot 1 + 1) + d_2 \cdot(9 \cdot 11 + 1) + ... + d_k \cdot (9 \cdot \underbrace{11..1}_\text{k times} + 1)
+$$
+
+and could be simplified as
+
+$$
+n = (d_0 + d_1 + d_2 + ... + d_k) + 9 \cdot (d_1 \cdot 1 + d_2 \cdot 11 + ... + d_k \cdot \underbrace{11..1}_\text{k times})
+$$
+
+The last step is to take the modulo from both sides:
+
+$$
+n \mod 9 = (d_0 + d_1 + d_2 + ... + d_k) \mod 9
+$$
+
+and to consider separately three cases: the sum of digits is 0, the sum of digits is divisible by 9, and the sum of digits is _not_ divisible by nine:
+
+$$
+dr_{10}(n) = 0, \qquad \text{if } n = 0
+$$
+
+$$
+dr_{10}(n) = 9, \qquad \text{if } n = 9 k 
+$$
+
+$$
+dr_{10}(n) = n \mod 9, \qquad \text{if } n \neq 9 k
+$$
+
+**Implementation**
+
+The straightforward implementation is 
+
+<iframe src=""https://leetcode.com/playground/CzKYBRXZ/shared"" frameBorder=""0"" width=""100%"" height=""191"" name=""CzKYBRXZ""></iframe>
+
+though two last cases could be merged into one
+
+$$
+dr_{10}(n) = 0, \qquad \text{if } n = 0 
+$$
+
+$$
+dr_{10}(n) = 1 + (n - 1) \mod 9, \qquad \text{if } n \neq 0
+$$
+
+<iframe src=""https://leetcode.com/playground/5sUsPBbx/shared"" frameBorder=""0"" width=""100%"" height=""157"" name=""5sUsPBbx""></iframe>
+
+#### Complexity Analysis
+
+Let $n$ be the input number.
+
+- Time complexity: $O(1)$
+
+    The function performs a constant number of operations, regardless of the input size. The operations involve simple arithmetic calculations and a conditional check, all of which take constant time.
+
+- Space complexity: $O(1)$
+
+    The function uses a constant amount of extra space. It does not depend on the input size and only uses a few variables for the calculations, which do not grow with the input.
+
+---"
