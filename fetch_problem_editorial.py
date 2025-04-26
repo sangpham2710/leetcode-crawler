@@ -1,46 +1,49 @@
 #!/usr/bin/env python3
 
+import db_utils
 import requests
 import json
-
-# import csv # No longer needed
+import os  # For environment variable configuration
 import sys
 import time
 import datetime
 import random
-
-# import os # No longer needed for config import
-from pathlib import Path
-import sqlite3  # Needed for DB interaction
-import db_utils  # Import the database utility module
+from requests.adapters import HTTPAdapter
 import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor
+import settings
+from settings import FULL_COOKIE, X_CSRF_TOKEN, UUUSERID
+import util
+import argparse
 
 # --- CONFIG ---
-# Configuration now primarily relies on direct values or db_utils
-# Using the cookie from the latest curl command provided
-FULL_COOKIE = 'gr_user_id=845f8890-da65-4d47-930d-8ee069a9eaa9; 87b5a3c3f1a55520_gr_last_sent_cs1=sanglythesis; __stripe_mid=f2208bfd-fb64-4949-bfe0-e95de794b3e42a34d1; cf_clearance=uN96HjGbxcPYcxYsezMlw6etWe7EHcBJZftvpA7H8yg-1744469424-1.2.1.1-QoGQJX4sn47epc7yeckg2vQ.gQB8ZzLsi_T5B_tIN6_XIGmA_QLE9hfjFl_QBqiLLyKG2jv5q6Yz.3zRuadMb9TjGxyat7X1IVzFUj4UohyehGha8rEAwaqx7MJd74O_lDNyFIIk2156X1haXBIXDkt5gl1O_RhWdaWhkDjdGr__nnlRdzHss7J4_3_dBy8qX1OJl2D30m0VlH7qLRxfRGFU5CPXbHed2LI91_UHN5sr41MhSCJovmPKss8yeIMYvP2Wb4iaYre4OXKo1BVdlPmTxX6N7JlBEd3rIH2WoUuY4oEH0i9sGqDtVPZs_fF5omqEyAa.BKo4RBuRdZGevJXCdipMqD88Ly2LywN0ji5vN2Tk.0sufSLcW7VDoe07; csrftoken=qCV7HFIWihz6NOKyrxL5gIFLR23zelsxvetapxDdJEnNZ1j56qLRH6LOJDn83kU0; _gid=GA1.2.1476346995.1745157752; INGRESSCOOKIE=8c327cf6cf4f169c9d94b0394e86bc92|8e0876c7c1464cc0ac96bc2edceabd27; ip_check=(false, "101.53.53.147"); _gcl_au=1.1.905053711.1745321970; _ga_DKXQ03QCVK=GS1.1.1745337312.2.0.1745337312.60.0.0; 87b5a3c3f1a55520_gr_session_id=dfca6aeb-94ad-4b3a-a0c0-3045b14650cb; 87b5a3c3f1a55520_gr_last_sent_sid_with_cs1=dfca6aeb-94ad-4b3a-a0c0-3045b14650cb; 87b5a3c3f1a55520_gr_session_id_sent_vst=dfca6aeb-94ad-4b3a-a0c0-3045b14650cb; _ga=GA1.1.322647468.1743747905; LEETCODE_SESSION=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJfYXV0aF91c2VyX2lkIjoiMTcxOTYxNTIiLCJfYXV0aF91c2VyX2JhY2tlbmQiOiJkamFuZ28uY29udHJpYi5hdXRoLmJhY2tlbmRzLk1vZGVsQmFja2VuZCIsIl9hdXRoX3VzZXJfaGFzaCI6ImQ4ZWI3OWM0MWUwMDE0MzNjZjA1ZmU3YTkwNjI3ZGFiY2NiMTlhYjg5YTBlM2ExMzlhYWNkMTc2ODE4ZjNlMGMiLCJzZXNzaW9uX3V1aWQiOiJlY2RkM2RiZiIsImlkIjoxNzE5NjE1MiwiZW1haWwiOiJzYW5nbHl0aGVzaXNAZ21haWwuY29tIiwidXNlcm5hbWUiOiJzYW5nbHl0aGVzaXMiLCJ1c2VyX3NsdWciOiJzYW5nbHl0aGVzaXMiLCJhdmF0YXIiOiJodHRwczovL2Fzc2V0cy5sZWV0Y29kZS5jb20vdXNlcnMvZGVmYXVsdF9hdmF0YXIuanBnIiwicmVmcmVzaGVkX2F0IjoxNzQ1MzM3MzEzLCJpcCI6IjEwMS41My41My4xNDciLCJpZGVudGl0eSI6ImQ2ZGNjMGE2ZGVmNTU4MmY4ZDNhOWY3ZjJhZGRiODhiIiwiZGV2aWNlX3dpdGhfaXAiOlsiMzI4NDg4NmI5ZjVkY2NiMDZiYmVmNmEwNzM5ZTJjNTQiLCIxMDEuNTMuNTMuMTQ3Il0sIl9zZXNzaW9uX2V4cGlyeSI6MTIwOTYwMH0.hTHjinYdgs_ViwEHdtFo2ws9J4aycAMrEtP2LGDG87w; 87b5a3c3f1a55520_gr_cs1=sanglythesis; _ga_CDRWKZTDEX=GS1.1.1745388961.34.1.1745393390.60.0.0'
-USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
-URL = "https://leetcode.com/graphql/"
+# Authentication cookie and tokens
+FULL_COOKIE = settings.FULL_COOKIE
+X_CSRF_TOKEN = settings.X_CSRF_TOKEN
+UUUSERID = settings.UUUSERID
 
-# Extract CSRF token and UUUserID from cookie/headers using latest curl info
-X_CSRF_TOKEN = "qCV7HFIWihz6NOKyrxL5gIFLR23zelsxvetapxDdJEnNZ1j56qLRH6LOJDn83kU0"  # From curl -H x-csrftoken
-UUUSERID = "3284886b9f5dccb06bbef6a0739e2c54"  # From curl -H uuuserid
+# HTTP / GraphQL settings
+USER_AGENT = settings.USER_AGENT
+URL = settings.URL
 
-# INFILE = "leetcode_company_problems.csv" # No longer needed
-# OUTFILE = "leetcode_editorial_content.csv" # No longer needed
-REQUEST_DELAY_SECONDS = 0.5  # Delay between requests per worker
-NUM_WORKERS = 12  # Reduced from 8 to prevent database contention
-FETCH_OLDER_THAN_DAYS = 1  # Fetch problems not updated in this many days
-MAX_RETRIES = 3  # Max retries for failed requests
-RETRY_DELAY_SECONDS = 2  # Delay between retries
-FORCE_REFETCH_ALL = True  # Set to True to ignore timestamps and fetch all slugs
-BATCH_SIZE = 50  # Size of batches for DB operations
+# Retry and delay configuration
+REQUEST_DELAY_SECONDS = settings.REQUEST_DELAY_SECONDS
+MAX_RETRIES = settings.MAX_RETRIES
+RETRY_DELAY_SECONDS = settings.RETRY_DELAY_SECONDS
+
+# Editorial fetch-specific concurrency & batching
+NUM_WORKERS = settings.EDITORIAL_NUM_WORKERS
+DB_WRITE_CONCURRENCY = settings.EDITORIAL_DB_WRITE_CONCURRENCY
+BATCH_SIZE = settings.BATCH_SIZE
+FETCH_OLDER_THAN_DAYS = settings.FETCH_OLDER_THAN_DAYS
+FORCE_REFETCH_ALL = settings.FORCE_REFETCH_ALL
 # ---------------
 
 # --- Global semaphore for database write operations ---
-db_write_semaphore = threading.Semaphore(3)  # Limit concurrent writes to database
+db_write_semaphore = threading.Semaphore(
+    DB_WRITE_CONCURRENCY
+)  # Limit concurrent writes to database
 
 # --- Global counters for tracking progress ---
 processed_count = 0  # Total problems processed
@@ -221,7 +224,8 @@ def make_graphql_request(title_slug, query, data_key, query_type):
     retries = 0
     while retries < MAX_RETRIES:
         try:
-            response = requests.post(URL, json=payload, headers=headers)
+            session = util.get_session()
+            response = session.post(URL, json=payload, headers=headers)
             if response.status_code == 200:
                 data = response.json()
                 if "data" in data and data["data"] is not None:
@@ -271,24 +275,91 @@ def _log(message, level="INFO", stream=sys.stdout, thread_name=None):
 
 # --- Setup Logging Function ---
 def setup_logging():
-    """Configure the Python logging module with proper formatting"""
-    import logging
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
+    """Configure logging via util"""
+    util.setup_logging()
 
 
 # --- Optimized Main ---
 def main():
+    # Declare globals before using them in defaults
+    global NUM_WORKERS, BATCH_SIZE, FETCH_OLDER_THAN_DAYS, FORCE_REFETCH_ALL, db_write_semaphore, FULL_COOKIE, X_CSRF_TOKEN, UUUSERID
+    # CLI options
+    parser = argparse.ArgumentParser(description="Fetch LeetCode Editorial & Details")
+    parser.add_argument(
+        "--cookie", default=settings.FULL_COOKIE, help="LeetCode session cookie string"
+    )
+    parser.add_argument(
+        "--csrftoken", default=settings.X_CSRF_TOKEN, help="X-CSRFToken header value"
+    )
+    parser.add_argument(
+        "--uuuserid", default=settings.UUUSERID, help="uuuserid header value"
+    )
+    parser.add_argument(
+        "--cookies-from-browser",
+        choices=["chrome", "firefox"],
+        default=None,
+        help="Load cookies directly from your browser via browser_cookie3",
+    )
+    parser.add_argument("--db-name", default=settings.DB_FILE)
+    parser.add_argument("--workers", type=int, default=settings.EDITORIAL_NUM_WORKERS)
+    parser.add_argument(
+        "--db-concurrency",
+        type=int,
+        default=settings.EDITORIAL_DB_WRITE_CONCURRENCY,
+    )
+    parser.add_argument("--batch-size", type=int, default=settings.BATCH_SIZE)
+    parser.add_argument(
+        "--fetch-days",
+        type=int,
+        default=settings.FETCH_OLDER_THAN_DAYS,
+    )
+    parser.add_argument(
+        "--force-refetch",
+        action="store_true",
+        default=settings.FORCE_REFETCH_ALL,
+    )
+    args = parser.parse_args()
+    # Override settings from CLI
+    db_name = args.db_name
+    # Cookies: browser first, then manual override
+    if args.cookies_from_browser:
+        FULL_COOKIE = util.load_cookies_from_browser(
+            browser=args.cookies_from_browser, domain="leetcode.com"
+        )
+    elif args.cookie:
+        FULL_COOKIE = args.cookie
+    # CSRF token override or extract from loaded cookie
+    if args.csrftoken:
+        X_CSRF_TOKEN = args.csrftoken
+    else:
+        match = next(
+            (t for t in FULL_COOKIE.split("; ") if t.startswith("csrftoken=")), None
+        )
+        if match:
+            X_CSRF_TOKEN = match.split("=")[1]
+    # UUUSERID override or extract
+    if args.uuuserid:
+        UUUSERID = args.uuuserid
+    else:
+        match = next(
+            (t for t in FULL_COOKIE.split("; ") if t.startswith("uuuserid=")), None
+        )
+        if match:
+            UUUSERID = match.split("=")[1]
+    # Update headers with new cookie and tokens
+    BASE_HEADERS["cookie"] = FULL_COOKIE
+    BASE_HEADERS["x-csrftoken"] = X_CSRF_TOKEN
+    BASE_HEADERS["uuuserid"] = UUUSERID
+    # Other overrides
+    NUM_WORKERS = args.workers
+    BATCH_SIZE = args.batch_size
+    FETCH_OLDER_THAN_DAYS = args.fetch_days
+    FORCE_REFETCH_ALL = args.force_refetch
+    db_write_semaphore = threading.Semaphore(args.db_concurrency)
     _log("Starting LeetCode Editorial & Detail Fetcher...")
     setup_logging()
 
     # Connect to database
-    db_name = "leetcode_data.sqlite"
     _log(f"Connecting to database: {db_name}")
 
     # Use a with statement for database connection to ensure proper cleanup
@@ -427,42 +498,31 @@ def process_slug_batch_worker(
                     "ugcArticleOfficialSolutionArticle",
                     "editorial",
                 )
+                # Only update editorial if non-empty content is returned
                 if editorial_response_data and editorial_response_data.get(
                     "ugcArticleOfficialSolutionArticle"
                 ):
-                    editorial_content_node = editorial_response_data[
-                        "ugcArticleOfficialSolutionArticle"
-                    ]
-                    if (
-                        editorial_content_node
-                        and editorial_content_node.get("content") is not None
-                    ):
-                        editorial_data = editorial_content_node
-                        # Add editorial details to the update
+                    node = editorial_response_data["ugcArticleOfficialSolutionArticle"]
+                    content = node.get("content") or ""
+                    if content.strip():
+                        # Add editorial details to the update only if content is non-empty
                         details_to_update.update(
                             {
-                                "editorial_content": editorial_data.get("content"),
-                                "editorial_uuid": editorial_data.get("uuid"),
+                                "editorial_content": content,
+                                "editorial_uuid": node.get("uuid"),
                                 "last_fetched_editorial": datetime.datetime.now().isoformat(
                                     sep=" ", timespec="seconds"
                                 ),
                             }
                         )
-                else:
-                    # Still mark as processed even if no editorial content is found
-                    # We don't want to keep retrying if the problem doesn't have an editorial
-                    details_to_update.update(
-                        {
-                            "last_fetched_editorial": datetime.datetime.now().isoformat(
-                                sep=" ", timespec="seconds"
-                            )
-                        }
-                    )
-
-                    # Only count as error if the response was None (API failure)
-                    if editorial_response_data is None:
+                    else:
+                        # Empty editorial content; schedule for retry later
                         current_editorial_error = True
                         editorial_error_local += 1
+                else:
+                    # GraphQL error or missing field
+                    current_editorial_error = True
+                    editorial_error_local += 1
 
                 # Filter out None values
                 filtered_details = {

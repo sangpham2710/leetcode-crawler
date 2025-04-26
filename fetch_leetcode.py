@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import requests
+from requests.adapters import HTTPAdapter
 import json
 import os
 import sys
@@ -11,10 +12,18 @@ import queue
 import sqlite3  # Import sqlite3 to handle exceptions directly
 import random
 import logging
+import argparse  # For command-line options
+import settings  # Central configuration
+import util  # Common utilities (session, logging)
 
 # from collections import defaultdict # No longer needed directly for output
 import db_utils  # Import the database utility module
 from db_utils import DB_FILE
+from settings import (
+    FULL_COOKIE,
+    X_CSRF_TOKEN,
+    UUUSERID,
+)  # Central auth and cookie configuration
 
 # --- ANSI Color Codes ---
 RED = "\033[91m"
@@ -25,12 +34,7 @@ YELLOW = "\033[93m"
 # --- Setup Logging Function ---
 def setup_logging():
     """Configure the Python logging module with proper formatting"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
+    util.setup_logging()
 
 
 # --- Logging Helper (with color and thread name) ---
@@ -48,39 +52,15 @@ def _log(message, level="INFO", stream=sys.stdout, thread_name=None):
 
 
 # --- CONFIG ---
-# Full cookie string from your working curl command's -b argument
-# IMPORTANT: Keep this up-to-date if your session expires
-# Using the cookie from the latest curl command provided (favoriteDetailV2ForCompany call)
-FULL_COOKIE = 'gr_user_id=845f8890-da65-4d47-930d-8ee069a9eaa9; 87b5a3c3f1a55520_gr_last_sent_cs1=sanglythesis; __stripe_mid=f2208bfd-fb64-4949-bfe0-e95de794b3e42a34d1; cf_clearance=uN96HjGbxcPYcxYsezMlw6etWe7EHcBJZftvpA7H8yg-1744469424-1.2.1.1-QoGQJX4sn47epc7yeckg2vQ.gQB8ZzLsi_T5B_tIN6_XIGmA_QLE9hfjFl_QBqiLLyKG2jv5q6Yz.3zRuadMb9TjGxyat7X1IVzFUj4UohyehGha8rEAwaqx7MJd74O_lDNyFIIk2156X1haXBIXDkt5gl1O_RhWdaWhkDjdGr__nnlRdzHss7J4_3_dBy8qX1OJl2D30m0VlH7qLRxfRGFU5CPXbHed2LI91_UHN5sr41MhSCJovmPKss8yeIMYvP2Wb4iaYre4OXKo1BVdlPmTxX6N7JlBEd3rIH2WoUuY4oEH0i9sGqDtVPZs_fF5omqEyAa.BKo4RBuRdZGevJXCdipMqD88Ly2LywN0ji5vN2Tk.0sufSLcW7VDoe07; csrftoken=qCV7HFIWihz6NOKyrxL5gIFLR23zelsxvetapxDdJEnNZ1j56qLRH6LOJDn83kU0; _gid=GA1.2.1476346995.1745157752; INGRESSCOOKIE=8c327cf6cf4f169c9d94b0394e86bc92|8e0876c7c1464cc0ac96bc2edceabd27; ip_check=(false, "101.53.53.147"); _gcl_au=1.1.905053711.1745321970; _ga_DKXQ03QCVK=GS1.1.1745337312.2.0.1745337312.60.0.0; 87b5a3c3f1a55520_gr_session_id=dfca6aeb-94ad-4b3a-a0c0-3045b14650cb; 87b5a3c3f1a55520_gr_last_sent_sid_with_cs1=dfca6aeb-94ad-4b3a-a0c0-3045b14650cb; 87b5a3c3f1a55520_gr_session_id_sent_vst=dfca6aeb-94ad-4b3a-a0c0-3045b14650cb; LEETCODE_SESSION=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJfYXV0aF91c2VyX2lkIjoiMTcxOTYxNTIiLCJfYXV0aF91c2VyX2JhY2tlbmQiOiJkamFuZ28uY29udHJpYi5hdXRoLmJhY2tlbmRzLk1vZGVsQmFja2VuZCIsIl9hdXRoX3VzZXJfaGFzaCI6ImQ4ZWI3OWM0MWUwMDE0MzNjZjA1ZmU3YTkwNjI3ZGFiY2NiMTlhYjg5YTBlM2ExMzlhYWNkMTc2ODE4ZjNlMGMiLCJzZXNzaW9uX3V1aWQiOiJlY2RkM2RiZiIsImlkIjoxNzE5NjE1MiwiZW1haWwiOiJzYW5nbHl0aGVzaXNAZ21haWwuY29tIiwidXNlcm5hbWUiOiJzYW5nbHl0aGVzaXMiLCJ1c2VyX3NsdWciOiJzYW5nbHl0aGVzaXMiLCJhdmF0YXIiOiJodHRwczovL2Fzc2V0cy5sZWV0Y29kZS5jb20vdXNlcnMvZGVmYXVsdF9hdmF0YXIuanBnIiwicmVmcmVzaGVkX2F0IjoxNzQ1MzM3MzEzLCJpcCI6IjEwMS41My41My4xNDciLCJpZGVudGl0eSI6ImQ2ZGNjMGE2ZGVmNTU4MmY4ZDNhOWY3ZjJhZGRiODhiIiwiZGV2aWNlX3dpdGhfaXAiOlsiMzI4NDg4NmI5ZjVkY2NiMDZiYmVmNmEwNzM5ZTJjNTQiLCIxMDEuNTMuNTMuMTQ3Il0sIl9zZXNzaW9uX2V4cGlyeSI6MTIwOTYwMH0.hTHjinYdgs_ViwEHdtFo2ws9J4aycAMrEtP2LGDG87w; _dd_s=rum=0&expire=1745395763622; 87b5a3c3f1a55520_gr_cs1=sanglythesis; _ga=GA1.1.322647468.1743747905; _ga_CDRWKZTDEX=GS1.1.1745388961.34.1.1745395290.60.0.0'
-
-# List of company slugs to process
-COMPANIES = json.load(open("companies.json"))
-URL = "https://leetcode.com/graphql/"
-USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
-REQUEST_DELAY_SECONDS = 0.5
-
+# HTTP / GraphQL settings from config
+URL = settings.URL
+USER_AGENT = settings.USER_AGENT
+REQUEST_DELAY_SECONDS = settings.REQUEST_DELAY_SECONDS
 # Thread configuration
-NUM_WORKERS = 8  # Using 8 workers for faster processing
-MAX_RETRIES = 5  # Max retries for failed requests
-RETRY_DELAY_SECONDS = (
-    3  # Delay between retries (increased to allow more time for lock resolution)
-)
-
-# Extract CSRF from the cookie (if needed, or use the one from headers)
-X_CSRF_TOKEN_MATCH = [
-    token.split("=")[1]
-    for token in FULL_COOKIE.split("; ")
-    if token.startswith("csrftoken=")
-]
-X_CSRF_TOKEN = X_CSRF_TOKEN_MATCH[0] if X_CSRF_TOKEN_MATCH else "missing_csrf_in_cookie"
-UUUSERID_MATCH = [
-    token.split("=")[1]
-    for token in FULL_COOKIE.split("; ")
-    if token.startswith("uuuserid=")
-]  # uuuserid might not be in cookie, use header one if available
-UUUSERID = (
-    UUUSERID_MATCH[0] if UUUSERID_MATCH else "3284886b9f5dccb06bbef6a0739e2c54"
-)  # Fallback to header from curl
+NUM_WORKERS = settings.NUM_WORKERS  # Number of worker threads
+# Retry settings
+MAX_RETRIES = settings.MAX_RETRIES  # Max retries for failed requests
+RETRY_DELAY_SECONDS = settings.RETRY_DELAY_SECONDS
 
 # --- Global Headers ---
 # Replicate headers from the latest curl command (favoriteDetailV2ForCompany)
@@ -118,8 +98,7 @@ counter_lock = threading.Lock()
 
 # --- Database Coordination ---
 # Semaphore to limit concurrent database write operations
-# Allow only 3 workers to write to the database simultaneously
-db_write_semaphore = threading.Semaphore(3)
+db_write_semaphore = threading.Semaphore(settings.DB_WRITE_CONCURRENCY)
 
 # --- Dead-Letter Queue ---
 dlq = queue.Queue()
@@ -133,7 +112,8 @@ def make_request(payload, referer, retries=MAX_RETRIES):
     for attempt in range(retries):
         response = None  # Initialize response here to handle potential assignment errors before exception
         try:
-            response = requests.post(URL, headers=headers, json=payload, timeout=45)
+            session = util.get_session()
+            response = session.post(URL, headers=headers, json=payload, timeout=45)
 
             # Check for server errors which might be temporary
             if 500 <= response.status_code < 600:
@@ -1088,6 +1068,43 @@ def parse_ac_rate(stats_json):
 
 def main():
     """Main function to execute the script"""
+    # Parse command-line options
+    parser = argparse.ArgumentParser(description="Fetch LeetCode data for companies")
+    parser.add_argument("--companies-file", default=settings.COMPANIES_FILE)
+    parser.add_argument("--workers", type=int, default=settings.NUM_WORKERS)
+    parser.add_argument(
+        "--db-concurrency", type=int, default=settings.DB_WRITE_CONCURRENCY
+    )
+    parser.add_argument(
+        "--cookies-from-browser",
+        choices=["chrome", "firefox"],
+        default=None,
+        help="Load cookies directly from your browser via browser_cookie3",
+    )
+    args = parser.parse_args()
+    # Override defaults
+    global COMPANIES, NUM_WORKERS, db_write_semaphore, FULL_COOKIE, X_CSRF_TOKEN, UUUSERID
+    COMPANIES = json.load(open(args.companies_file))
+    NUM_WORKERS = args.workers
+    db_write_semaphore = threading.Semaphore(args.db_concurrency)
+    # Optionally load cookies from browser
+    if args.cookies_from_browser:
+        # Pull cookie jar directly from browser
+        full_cookie = util.load_cookies_from_browser(
+            browser=args.cookies_from_browser, domain="leetcode.com"
+        )
+        FULL_COOKIE = full_cookie
+        # Re-extract CSRF and UUUSERID from loaded cookies
+        tokens = [t for t in FULL_COOKIE.split("; ") if t.startswith("csrftoken=")]
+        if tokens:
+            X_CSRF_TOKEN = tokens[0].split("=")[1]
+        tokens = [t for t in FULL_COOKIE.split("; ") if t.startswith("uuuserid=")]
+        if tokens:
+            UUUSERID = tokens[0].split("=")[1]
+        # Update headers map
+        BASE_HEADERS["cookie"] = FULL_COOKIE
+        BASE_HEADERS["x-csrftoken"] = X_CSRF_TOKEN
+        BASE_HEADERS["uuuserid"] = UUUSERID
     start_time = time.time()
 
     # Setup logging
