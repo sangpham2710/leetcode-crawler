@@ -1,3 +1,6 @@
 venv/**
 __pycache__/**
-*.sqlite*
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+logs/**

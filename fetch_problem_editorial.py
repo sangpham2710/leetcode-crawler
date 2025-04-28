@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 
 import db_utils
-import requests
-import json
-import os  # For environment variable configuration
 import sys
 import time
 import datetime
 import random
-from requests.adapters import HTTPAdapter
 import threading
 import queue
-from concurrent.futures import ThreadPoolExecutor
 import settings
 from settings import FULL_COOKIE, X_CSRF_TOKEN, UUUSERID
 import util
@@ -25,7 +20,7 @@ UUUSERID = settings.UUUSERID
 
 # HTTP / GraphQL settings
 USER_AGENT = settings.USER_AGENT
-URL = settings.URL
+URL = settings.API_URL
 
 # Retry and delay configuration
 REQUEST_DELAY_SECONDS = settings.REQUEST_DELAY_SECONDS
@@ -51,6 +46,66 @@ detail_error_count = 0  # Problems with detail fetch errors
 editorial_error_count = 0  # Problems with editorial fetch errors
 update_success_count = 0  # Successfully updated problems
 counter_lock = threading.Lock()  # Lock to prevent race conditions
+
+# --- Retry Queue for Failed Updates ---
+retry_queue = queue.Queue()  # Queue to hold items that failed to update
+
+
+# Process retry items at the end
+def process_retry_queue(db_name):
+    """Process any items that failed and were placed in the retry queue"""
+    if retry_queue.empty():
+        _log("No items in retry queue.")
+        return
+
+    _log(f"Processing {retry_queue.qsize()} items from retry queue...")
+    with db_utils.connect_db(db_name) as conn:
+        # Process retry queue in batches
+        batch_size = 50
+        batch_updates = []
+        retried = 0
+        succeeded = 0
+
+        while not retry_queue.empty():
+            try:
+                item = retry_queue.get_nowait()
+                batch_updates.append(item)
+                retried += 1
+
+                # Process in batches
+                if len(batch_updates) >= batch_size or retry_queue.empty():
+                    try:
+                        # Deduplicate by slug (keep newest updates)
+                        deduplicated = {}
+                        for update in batch_updates:
+                            slug = update["slug"]
+                            deduplicated[slug] = update["details"]
+
+                        # Convert to format for batch update
+                        problems_data = [
+                            {**details, "title_slug": slug}
+                            for slug, details in deduplicated.items()
+                        ]
+
+                        # Update in a single transaction
+                        updated = db_utils.batch_update_problem_details(
+                            conn, problems_data
+                        )
+                        succeeded += updated
+                        _log(
+                            f"Retry batch: Updated {updated}/{len(problems_data)} items."
+                        )
+
+                        # Clear batch
+                        batch_updates = []
+                    except Exception as e:
+                        _log(f"Error processing retry batch: {e}", level="ERROR")
+            except queue.Empty:
+                break
+
+        _log(
+            f"Retry queue processing complete: {succeeded}/{retried} items updated successfully."
+        )
 
 
 # --- Database Schema Initialization ---
@@ -405,6 +460,11 @@ def main():
         # Wait for all tasks to complete
         slug_queue.join()
 
+        # Process any retries
+        if not retry_queue.empty():
+            _log(f"Processing retry queue with {retry_queue.qsize()} items")
+            process_retry_queue(db_name)
+
         # Print summary
         with counter_lock:  # Access counters safely
             _log("=" * 60)
@@ -544,51 +604,35 @@ def process_slug_batch_worker(
             if batch_updates:
                 try:
                     with db_write_semaphore:
-                        # Acquire a write lock on the database to prevent concurrent writes
                         _log(
                             f"Processing batch of {len(batch_updates)} updates",
                             thread_name=thread_name,
                         )
 
-                        # Start a transaction for the batch
-                        cursor = conn.cursor()
-                        cursor.execute("BEGIN TRANSACTION")
-
-                        try:
-                            # Process each item in the batch
-                            for update in batch_updates:
-                                slug = update["slug"]
-                                details = update["details"]
-
-                                # Use the improved update_problem_details function
-                                result = db_utils.update_problem_details(
-                                    conn, slug, details
-                                )
-
-                                # The function now returns True/False directly instead of a cursor
-                                if result:
-                                    updates_successful_local += 1
-
-                            # Commit the transaction
-                            conn.commit()
-                            _log(
-                                f"Successfully committed batch of {len(batch_updates)} updates",
-                                thread_name=thread_name,
-                            )
-
-                        except Exception as e:
-                            # Rollback on error
-                            conn.rollback()
-                            _log(
-                                f"Error processing batch updates: {e}",
-                                level="ERROR",
-                                thread_name=thread_name,
-                            )
-
+                        # Use batch update helper
+                        problems_data = [
+                            {**u["details"], "title_slug": u["slug"]}
+                            for u in batch_updates
+                        ]
+                        updated = db_utils.batch_update_problem_details(
+                            conn, problems_data
+                        )
+                        updates_successful_local += updated
+                        _log(
+                            f"Successfully processed batch of {updated} updates",
+                            thread_name=thread_name,
+                        )
                 except Exception as e:
                     _log(
-                        f"Error acquiring database semaphore: {e}",
+                        f"Error during batch update: {e}",
                         level="ERROR",
+                        thread_name=thread_name,
+                    )
+                    # Add failed items to retry queue
+                    for update in batch_updates:
+                        retry_queue.put(update)
+                    _log(
+                        f"Added {len(batch_updates)} items to retry queue",
                         thread_name=thread_name,
                     )
 

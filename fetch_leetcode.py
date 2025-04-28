@@ -1,29 +1,55 @@
 #!/usr/bin/env python3
+"""
+LeetCode Problem and Company Data Fetcher
 
+This module fetches problem data from LeetCode, including:
+- Company to problem relationships
+- Problem metadata (difficulty, title, tags)
+- Problem frequency data
+
+It uses concurrent workers to efficiently process multiple companies and
+implements batch database operations to minimize lock contention.
+
+The module is designed to be resilient to network issues and database locks,
+with graceful error handling and retries where appropriate.
+
+Usage:
+    python fetch_leetcode.py [options]
+
+Author: [Your Name]
+"""
+
+import db_utils
 import requests
-from requests.adapters import HTTPAdapter
 import json
 import os
 import sys
 import time
-import datetime  # Add datetime import
-import threading
-import queue
-import sqlite3  # Import sqlite3 to handle exceptions directly
+import datetime
 import random
 import logging
-import argparse  # For command-line options
-import settings  # Central configuration
-import util  # Common utilities (session, logging)
+import threading
+import queue
+import argparse
 
-# from collections import defaultdict # No longer needed directly for output
-import db_utils  # Import the database utility module
-from db_utils import DB_FILE
+import util
+import settings
+
+# Import settings with explicit namespace to make it clear where they come from
 from settings import (
+    NUM_WORKERS,
+    DB_WRITE_CONCURRENCY,
+    COMPANIES_FILE,
+    API_URL as URL,
+    USER_AGENT,
     FULL_COOKIE,
     X_CSRF_TOKEN,
     UUUSERID,
-)  # Central auth and cookie configuration
+    REQUEST_DELAY_SECONDS,
+    MAX_RETRIES,
+    RETRY_DELAY_SECONDS,
+    TIMEOUT_SECONDS,
+)
 
 # --- ANSI Color Codes ---
 RED = "\033[91m"
@@ -51,343 +77,155 @@ def _log(message, level="INFO", stream=sys.stdout, thread_name=None):
         print(f"{log_prefix}{message}", file=stream)
 
 
-# --- CONFIG ---
-# HTTP / GraphQL settings from config
-URL = settings.URL
-USER_AGENT = settings.USER_AGENT
-REQUEST_DELAY_SECONDS = settings.REQUEST_DELAY_SECONDS
-# Thread configuration
-NUM_WORKERS = settings.NUM_WORKERS  # Number of worker threads
-# Retry settings
-MAX_RETRIES = settings.MAX_RETRIES  # Max retries for failed requests
-RETRY_DELAY_SECONDS = settings.RETRY_DELAY_SECONDS
+# --- Global variables for tracking ---
+total_problems_processed = 0  # Total problems processed
+total_categories_processed = 0  # Total categories processed
+counter_lock = threading.Lock()  # Lock to prevent race conditions in counters
+successful_companies = set()  # Track successfully processed companies
+failed_companies = set()  # Track failed companies
 
-# --- Global Headers ---
-# Replicate headers from the latest curl command (favoriteDetailV2ForCompany)
-BASE_HEADERS = {
-    "accept": "*/*",
-    "accept-language": "en-US,en;q=0.9",
-    "authorization": ";",  # Note: Authorization header seems empty in curl?
-    "baggage": "sentry-environment=production,sentry-release=9c5cb314,sentry-transaction=%2Fcompany%2F%5Bslug%5D,sentry-public_key=2a051f9838e2450fbdd5a77eb62cc83c,sentry-trace_id=e699472efb0c4cf081e6b2f7d1639986,sentry-sample_rate=0.03",
-    "content-type": "application/json",
-    "cookie": FULL_COOKIE,
-    "origin": "https://leetcode.com",
-    "priority": "u=1, i",
-    "random-uuid": "2ab45d54-ea07-e56c-6815-45c5f73fd8e6",
-    # Referer is set dynamically per request
-    "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"macOS"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-    "sentry-trace": "e699472efb0c4cf081e6b2f7d1639986-869de5c8e5306279-0",  # Updated sentry trace from curl
-    "user-agent": USER_AGENT,
-    "uuuserid": UUUSERID,
-    "x-csrftoken": X_CSRF_TOKEN,  # Use extracted or hardcoded CSRF token
-}
-# ----------------------
-
-# --- Global Counters & Lock ---
-processed_companies = 0
-failed_companies_api = 0  # Companies failed due to API errors
-failed_companies_db = 0  # Companies failed due to critical DB errors after retries
-total_problems_processed = 0
-total_categories_processed = 0
-counter_lock = threading.Lock()
-
-# --- Database Coordination ---
-# Semaphore to limit concurrent database write operations
-db_write_semaphore = threading.Semaphore(settings.DB_WRITE_CONCURRENCY)
-
-# --- Dead-Letter Queue ---
-dlq = queue.Queue()
+# Initialize the DB write semaphore for limiting concurrent DB access
+db_write_semaphore = threading.Semaphore(DB_WRITE_CONCURRENCY)
 
 
 def make_request(payload, referer, retries=MAX_RETRIES):
-    """Makes a POST request to the LeetCode GraphQL endpoint with retry logic."""
-    headers = BASE_HEADERS.copy()
-    headers["Referer"] = referer
+    """Make a request to the LeetCode GraphQL endpoint with retries."""
+    # This simple function gets replaced with the decorator version
+    return _make_request_impl(payload, referer)
 
-    for attempt in range(retries):
-        response = None  # Initialize response here to handle potential assignment errors before exception
-        try:
-            session = util.get_session()
-            response = session.post(URL, headers=headers, json=payload, timeout=45)
 
-            # Check for server errors which might be temporary
-            if 500 <= response.status_code < 600:
-                _log(
-                    f"Server error ({response.status_code}) for referer '{referer}'. Retrying in {RETRY_DELAY_SECONDS}s...",
-                    level="WARN",
-                    stream=sys.stderr,
-                    thread_name=threading.current_thread().name,
-                )
-                # Go to the next iteration to retry after delay
-                # Add delay *before* continuing the loop
-                time.sleep(RETRY_DELAY_SECONDS)
-                continue
+@util.retry_with_backoff(max_retries=MAX_RETRIES, initial_delay=RETRY_DELAY_SECONDS)
+def _make_request_impl(payload, referer):
+    """
+    Implementation of the GraphQL request with proper headers.
 
-            # Raise exceptions for other bad statuses (e.g., 4xx client errors)
-            response.raise_for_status()
+    This is wrapped by the retry decorator for automatic retries.
 
-            # Decode JSON response - moved inside try as it can fail
-            data = response.json()
+    Args:
+        payload: The GraphQL query payload
+        referer: The referer URL for the request
 
-            # Check for GraphQL errors within the JSON response
-            if "errors" in data:
-                _log(
-                    f"GraphQL error: {json.dumps(data['errors'])}",
-                    level="ERROR",
-                    stream=sys.stderr,
-                    thread_name=threading.current_thread().name,
-                )
-                # Log payload and referer for easier debugging of GraphQL errors
-                _log(
-                    f"   Request Payload: {json.dumps(payload)}",
-                    level="ERROR",
-                    stream=sys.stderr,
-                    thread_name=threading.current_thread().name,
-                )
-                _log(
-                    f"   Referer: {referer}",
-                    level="ERROR",
-                    stream=sys.stderr,
-                    thread_name=threading.current_thread().name,
-                )
-                return None  # GraphQL errors are usually not retryable
+    Returns:
+        dict: Parsed JSON response
 
-            # If no errors (HTTP, JSON, GraphQL), return the data successfully
-            return data
+    Raises:
+        requests.RequestException: If the request fails after retries
+    """
+    logger = logging.getLogger(__name__)
 
-        except requests.exceptions.Timeout:
-            _log(
-                f"Request timed out for referer: {referer}. Attempt {attempt + 1}/{retries}",
-                level="WARN",  # Log timeout as WARN, retry might fix it
-                stream=sys.stderr,
-                thread_name=threading.current_thread().name,
-            )
-            # Wait before retrying the loop
-            if attempt < retries - 1:
-                time.sleep(RETRY_DELAY_SECONDS)
-            # else: loop will naturally end after this attempt
+    # Build headers with dynamic referer
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+        "Referer": referer,
+        "Origin": "https://leetcode.com",
+        "x-csrftoken": X_CSRF_TOKEN,
+        "Cookie": FULL_COOKIE,
+        "uuuserid": UUUSERID,
+    }
 
-        except requests.exceptions.RequestException as e:
-            # Includes connection errors, non-5xx HTTP errors after raise_for_status()
-            _log(
-                f"Request failed for referer {referer}: {e}",
-                level="ERROR",
-                stream=sys.stderr,
-                thread_name=threading.current_thread().name,
-            )
-            # These are generally not retryable, so exit the function immediately
-            return None
+    # Add small random delay to prevent rate limiting
+    time.sleep(random.uniform(0.2, REQUEST_DELAY_SECONDS))
 
-        except json.JSONDecodeError as e:
-            _log(
-                f"Failed to decode JSON response for referer {referer}: {e}",
-                level="ERROR",
-                stream=sys.stderr,
-                thread_name=threading.current_thread().name,
-            )
-            # Log raw response text if possible
-            raw_text = "<Response object not available>"
-            if response is not None and hasattr(response, "text"):
-                raw_text = response.text[:500] + "..."
-            _log(
-                f"Raw response text: {raw_text}",
-                level="ERROR",
-                stream=sys.stderr,
-                thread_name=threading.current_thread().name,
-            )
+    # Get the session from our utility that has retry logic built in
+    session = util.get_session()
+    response = session.post(URL, json=payload, headers=headers, timeout=TIMEOUT_SECONDS)
 
-            # JSON decode errors are not retryable
-            return None
+    # Raise exceptions for HTTP errors
+    response.raise_for_status()
 
-        # If we reached here within the loop without returning/continuing,
-        # it implies an error occured where we need to retry (e.g., Timeout)
-        # The delay is handled within the except block for Timeout.
-
-    # If the loop completes without returning data, all retries failed
-    _log(
-        f"All {retries} retries failed for referer: {referer} (likely due to timeouts or repeated server errors).",
-        level="ERROR",
-        stream=sys.stderr,
-        thread_name=threading.current_thread().name,
-    )
-    return None
+    # Parse and return JSON
+    return response.json()
 
 
 def process_company_worker(company_queue):
-    """Worker thread function to process companies from the queue."""
-    global processed_companies, failed_companies_api, failed_companies_db, total_problems_processed, total_categories_processed
+    """
+    Worker function to process companies from a queue.
 
+    Processes each company entry from the queue until empty, tracking
+    success/failure and ensuring graceful thread cleanup.
+
+    Args:
+        company_queue: Queue containing company slugs to process
+    """
+    logger = logging.getLogger(__name__)
     thread_name = threading.current_thread().name
-    worker_conn = None
+
+    # Register this thread for shutdown tracking
+    util.register_thread()
 
     try:
-        # Configure SQLite connection for this worker with a longer timeout
-        worker_conn = db_utils.connect_db(timeout=20.0, thread_name=thread_name)
-        if not worker_conn:
-            _log(
-                f"Failed to get DB connection. Exiting worker.",
-                level="DB ERROR",
-                stream=sys.stderr,
-                thread_name=thread_name,
-            )
-            return
+        # Create a thread-local database connection
+        with db_utils.connect_db(thread_name=thread_name) as conn:
+            logger.info(f"Worker starting")
 
-        while True:
-            company_slug = None  # Initialize for finally block
-            try:
-                company_slug = company_queue.get_nowait()
-            except queue.Empty:
-                break  # Queue is empty
-
-            company_processed_successfully = False
-            company_db_failure = False
-            company_api_failure = False
-
-            try:
-                # 1. Get or create company ID (Critical DB step)
-                # Acquire semaphore for this short database operation
-                with db_write_semaphore:
-                    company_id = db_utils.get_or_create_id(
-                        worker_conn, "Companies", "slug", company_slug
-                    )
-
-                if company_id is None:
-                    # This means get_or_create_id failed even after retries
-                    error_msg = f"Failed to get/create DB entry for company '{company_slug}' after retries."
-                    _log(
-                        error_msg,
-                        level="DB ERROR",
-                        stream=sys.stderr,
-                        thread_name=thread_name,
-                    )
-                    dlq.put(
-                        {
-                            "type": "company_id",
-                            "slug": company_slug,
-                            "error": "DB lock/Integrity Error",
-                            "worker": thread_name,
-                            "timestamp": datetime.datetime.now().strftime(
-                                "%Y-%m-%d %H:%M:%S"
-                            ),
-                        }
-                    )
-                    company_db_failure = True
-                    # Skip processing this company further
-                    continue
-
-                # 2. Process company data (API calls + further DB ops)
-                success = process_company_data(
-                    worker_conn, company_slug, company_id, thread_name
-                )
-
-                if success:
-                    # Commit transaction for this company if all ops succeeded
-                    try:
-                        with db_write_semaphore:
-                            worker_conn.commit()
-                        company_processed_successfully = True
-                    except sqlite3.Error as commit_e:
-                        _log(
-                            f"Commit failed for company '{company_slug}': {commit_e}",
-                            level="DB ERROR",
-                            stream=sys.stderr,
-                            thread_name=thread_name,
-                        )
-                        dlq.put(
-                            {
-                                "type": "company_commit",
-                                "slug": company_slug,
-                                "error": str(commit_e),
-                                "worker": thread_name,
-                                "timestamp": datetime.datetime.now().strftime(
-                                    "%Y-%m-%d %H:%M:%S"
-                                ),
-                            }
-                        )
-                        company_db_failure = (
-                            True  # Treat commit failure as DB failure for this company
-                        )
-                        try:
-                            worker_conn.rollback()  # Attempt rollback
-                        except:
-                            pass
-                else:
-                    # process_company_data returned False, indicating API or internal DB error
-                    # Errors within process_company_data should have logged specifics and potentially added to DLQ
-                    # Rollback any partial changes for this company
-                    _log(
-                        f"Rolling back changes for company '{company_slug}' due to internal errors.",
-                        level="WARN",
-                        stream=sys.stderr,
-                        thread_name=thread_name,
-                    )
-                    company_api_failure = (
-                        True  # Assume API failure if not explicitly DB
-                    )
-                    try:
-                        with db_write_semaphore:
-                            worker_conn.rollback()
-                    except sqlite3.Error as rb_e:
-                        _log(
-                            f"Rollback failed for company '{company_slug}': {rb_e}",
-                            level="DB WARN",
-                            stream=sys.stderr,
-                            thread_name=thread_name,
-                        )
-
-            except Exception as inner_e:
-                # Catch unexpected errors during processing a single company
-                _log(
-                    f"Unexpected error processing company '{company_slug}': {inner_e}",
-                    level="ERROR",
-                    stream=sys.stderr,
-                    thread_name=thread_name,
-                )
-                company_api_failure = (
-                    True  # Treat unexpected as potential API/logic error
-                )
+            # Process companies from the queue until empty or shutdown requested
+            while not util.shutdown_requested():
                 try:
-                    with db_write_semaphore:
-                        worker_conn.rollback()
-                except:
-                    pass
-            finally:
-                # Update counters based on outcome for this company
-                with counter_lock:
-                    if company_processed_successfully:
-                        processed_companies += 1
-                    elif company_db_failure:
-                        failed_companies_db += 1
-                    else:  # Includes API failures and other unexpected errors
-                        failed_companies_api += 1
+                    # Get a company from the queue with a 1-second timeout
+                    # This allows checking the shutdown flag periodically
+                    company_slug = company_queue.get(timeout=1.0)
+                except queue.Empty:
+                    break  # Queue is empty, exit the loop
+                except Exception as e:
+                    logger.warning(f"Error getting item from queue: {e}")
+                    continue  # Skip this iteration if queue get fails
 
-                if company_slug:
-                    company_queue.task_done()  # Signal task completion only if a slug was dequeued
+                # Process this company
+                try:
+                    with util.operation_timer(f"process_company_{company_slug}"):
+                        logger.info(f"Processing company: {company_slug}")
 
-            # Variable delay between companies - shorter if we didn't need to access database a lot
-            if company_processed_successfully:
-                time.sleep(REQUEST_DELAY_SECONDS)  # Normal delay
-            else:
-                # Longer delay after failures to allow system to recover
-                time.sleep(REQUEST_DELAY_SECONDS * 2)
+                        # Fetch company_id (possibly create entry)
+                        company_id = db_utils.get_or_create_id(
+                            conn,
+                            "Companies",
+                            "slug",
+                            company_slug,
+                            {"name": company_slug},
+                        )
 
-    except Exception as outer_e:
-        # Catch errors during worker setup or loop logic
-        _log(
-            f"Worker encountered major error: {outer_e}",
-            level="ERROR",
-            stream=sys.stderr,
-            thread_name=thread_name,
-        )
-        # Note: If this happens, tasks might remain in the queue.
+                        if company_id is None:
+                            logger.error(
+                                f"Failed to get or create company ID for {company_slug}. Skipping."
+                            )
+                            with counter_lock:
+                                failed_companies.add(company_slug)
+                            company_queue.task_done()
+                            continue
+
+                        # Process the company data
+                        success = process_company_data(
+                            conn, company_slug, company_id, thread_name
+                        )
+
+                        # Track result
+                        if success:
+                            with counter_lock:
+                                successful_companies.add(company_slug)
+                        else:
+                            with counter_lock:
+                                failed_companies.add(company_slug)
+
+                except Exception as e:
+                    logger.exception(f"Error processing company {company_slug}: {e}")
+                    with counter_lock:
+                        failed_companies.add(company_slug)
+
+                finally:
+                    # Always mark task as done
+                    company_queue.task_done()
+
+            if util.shutdown_requested():
+                logger.info("Shutdown requested - worker exiting")
+
+    except Exception as e:
+        logger.exception(f"Fatal worker error: {e}")
+
     finally:
-        if worker_conn:
-            db_utils.close_connection(worker_conn)
+        # Always unregister the thread when done
+        util.unregister_thread()
+        logger.info("Worker finished")
 
 
 def process_company_data(conn, company_slug, company_id, thread_name=None):
@@ -743,152 +581,67 @@ def process_company_data(conn, company_slug, company_id, thread_name=None):
     )
     with db_write_semaphore:
         _log(
-            f"Starting database operations for company {company_slug} ({len(all_problems_data)} problems, {len(categories_to_process)} categories)",
+            f"Starting combined transaction for company {company_slug} ({len(all_problems_data)} problems, {len(categories_to_process)} categories)",
             thread_name=thread_name,
         )
+        conn.execute("BEGIN")
 
-        # 1. Batch process all categories
-        _log(
-            f"Batch processing {len(categories_to_process)} categories",
-            thread_name=thread_name,
-        )
         category_id_map = db_utils.batch_get_or_create_categories(
             conn, categories_to_process
         )
-
-        if not category_id_map:
-            _log(
-                f"Failed to process categories for {company_slug}",
-                level="ERROR",
-                stream=sys.stderr,
-                thread_name=thread_name,
-            )
-            return False
-
-        local_category_count = len(category_id_map)
-
-        # 2. Batch process all tags (after deduplication)
-        all_unique_tags = {}
-        for tag in all_tags:
-            if "slug" in tag:
-                slug = tag["slug"]
-                if slug not in all_unique_tags:
-                    all_unique_tags[slug] = tag
-
-        _log(
-            f"Batch processing {len(all_unique_tags)} unique tags",
-            thread_name=thread_name,
-        )
+        all_unique_tags = {t["slug"]: t for t in all_tags if "slug" in t}
         tag_id_map = db_utils.batch_get_or_create_tags(
             conn, list(all_unique_tags.values())
         )
+        problem_id_map = db_utils.batch_get_or_create_problems(conn, all_problems_data)
 
-        # 3. Process all collected problems
-        _log(
-            f"Batch processing {len(all_problems_data)} problems for company {company_slug}",
-            thread_name=thread_name,
-        )
-
-        # Update problem data with category IDs
+        # Prepare junctions and updates
+        problem_company_junctions = []
+        problem_category_junctions = []
+        problem_tag_junctions = []
+        problem_ids_for_timestamps = []
+        frequency_updates = []
         for problem in all_problems_data:
-            category_slug = problem.pop(
-                "category_slug", None
-            )  # Remove and get category_slug
-            if category_slug and category_slug in category_id_map:
-                problem["category_id"] = category_id_map[category_slug]
-
-        try:
-            # Batch get or create all problems
-            problem_id_map = db_utils.batch_get_or_create_problems(
-                conn, all_problems_data
+            slug = problem["title_slug"]
+            pid = problem_id_map.get(slug)
+            if not pid:
+                continue
+            problem_ids_for_timestamps.append(pid)
+            problem_company_junctions.append(
+                {"problem_id": pid, "company_id": company_id}
             )
-
-            # Prepare for batch operations
-            problem_company_junctions = []
-            problem_category_junctions = []
-            problem_tag_junctions = []
-            problem_ids_for_timestamps = []
-
-            # Process relationships and other operations
-            for problem_data in all_problems_data:
-                slug = problem_data["title_slug"]
-                problem_id = problem_id_map.get(slug)
-
-                if not problem_id:
-                    _log(
-                        f"Missing problem_id for slug '{slug}' after batch processing",
-                        level="WARN",
-                        stream=sys.stderr,
-                        thread_name=thread_name,
-                    )
-                    continue
-
-                # Add problem_id to timestamp update batch
-                problem_ids_for_timestamps.append(problem_id)
-
-                # Add to problem-company junction batch
-                problem_company_junctions.append(
-                    {"problem_id": problem_id, "company_id": company_id}
+            freq = problem.get("frequency")
+            if freq is not None:
+                frequency_updates.append(
+                    {"problem_id": pid, "company_id": company_id, "frequency": freq}
                 )
-
-                # Add to frequency updates if available
-                frequency = problem_data.get("frequency")
-                if frequency is not None:
-                    db_utils.update_problem_company_frequency(
-                        conn, problem_id, company_id, frequency
-                    )
-
-                # Add to problem-category junction batch
-                category_id = problem_data.get("category_id")
-                if category_id:
-                    problem_category_junctions.append(
-                        {
-                            "problem_id": problem_id,
-                            "category_id": category_id,
-                            "company_id": company_id,
-                        }
-                    )
-
-                # Add to problem-tag junction batch
-                for tag_data in problem_data.get("tags", []):
-                    tag_slug = tag_data.get("slug")
-                    if not tag_slug or tag_slug not in tag_id_map:
-                        continue
-
-                    tag_id = tag_id_map[tag_slug]
+            cid = problem.get("category_id")
+            if cid:
+                problem_category_junctions.append(
+                    {"problem_id": pid, "category_id": cid, "company_id": company_id}
+                )
+            for tag in problem.get("tags", []):
+                ts = tag.get("slug")
+                if ts and ts in tag_id_map:
                     problem_tag_junctions.append(
-                        {"problem_id": problem_id, "tag_id": tag_id}
+                        {"problem_id": pid, "tag_id": tag_id_map[ts]}
                     )
 
-            # Execute all batch operations
-            if problem_company_junctions:
-                _log(
-                    f"Inserting {len(problem_company_junctions)} problem-company relationships",
-                    thread_name=thread_name,
-                )
-                db_utils.batch_insert_junctions(
-                    conn, "ProblemCompanies", problem_company_junctions
-                )
-
+        # Insert junction tables under lock
+        if problem_company_junctions:
+            db_utils.batch_insert_junctions(
+                conn, "ProblemCompanies", problem_company_junctions
+            )
+        if frequency_updates:
+            db_utils.batch_update_problem_company_frequencies(conn, frequency_updates)
             if problem_category_junctions:
-                _log(
-                    f"Inserting {len(problem_category_junctions)} problem-category relationships",
-                    thread_name=thread_name,
-                )
                 db_utils.batch_insert_junctions(
                     conn, "ProblemCategories", problem_category_junctions
                 )
-
             if problem_tag_junctions:
-                _log(
-                    f"Inserting {len(problem_tag_junctions)} problem-tag relationships",
-                    thread_name=thread_name,
-                )
                 db_utils.batch_insert_junctions(
                     conn, "ProblemTags", problem_tag_junctions
                 )
-
-            # Update all timestamps in one batch
             if problem_ids_for_timestamps:
                 db_utils.batch_update_timestamps(
                     conn,
@@ -898,24 +651,14 @@ def process_company_data(conn, company_slug, company_id, thread_name=None):
                     "last_fetched_company",
                 )
 
-            _log(
-                f"Successfully processed {len(problem_ids_for_timestamps)} problems for company {company_slug}",
-                thread_name=thread_name,
-            )
-            local_problem_count = len(problem_ids_for_timestamps)
+        conn.commit()
+        logger.info(f"Committed combined transaction for company {company_slug}")
 
-        except Exception as batch_e:
-            _log(
-                f"Batch processing failed for company {company_slug}: {batch_e}",
-                level="ERROR",
-                stream=sys.stderr,
-                thread_name=thread_name,
-            )
-            current_company_success = False
+        local_problem_count = len(problem_ids_for_timestamps)
 
     # Update global counters
     with counter_lock:
-        total_categories_processed += local_category_count
+        total_categories_processed += len(category_id_map)
         total_problems_processed += local_problem_count
 
     _log(f"Completed processing company {company_slug}", thread_name=thread_name)
@@ -1067,13 +810,43 @@ def parse_ac_rate(stats_json):
 
 
 def main():
-    """Main function to execute the script"""
-    # Parse command-line options
+    """
+    Main entry point for the LeetCode problem and company data fetcher.
+
+    Handles command-line arguments, initializes the environment, creates
+    worker threads, and processes the company queue with a graceful
+    shutdown mechanism.
+
+    Returns:
+        int: 0 for success, 1 for failure
+    """
+    # Parse command-line arguments
     parser = argparse.ArgumentParser(description="Fetch LeetCode data for companies")
-    parser.add_argument("--companies-file", default=settings.COMPANIES_FILE)
-    parser.add_argument("--workers", type=int, default=settings.NUM_WORKERS)
     parser.add_argument(
-        "--db-concurrency", type=int, default=settings.DB_WRITE_CONCURRENCY
+        "--companies-file",
+        default=COMPANIES_FILE,
+        help="Path to JSON file with company data",
+    )
+    parser.add_argument(
+        "--workers", type=int, default=NUM_WORKERS, help="Number of worker threads"
+    )
+    parser.add_argument(
+        "--db-concurrency",
+        type=int,
+        default=DB_WRITE_CONCURRENCY,
+        help="Max concurrent DB operations",
+    )
+    parser.add_argument(
+        "--log-file", default=settings.LOG_FILE, help="Log file to write to"
+    )
+    parser.add_argument(
+        "--no-rich", action="store_true", help="Disable rich console logging"
+    )
+    parser.add_argument(
+        "--sync-mode",
+        choices=["OFF", "NORMAL", "FULL"],
+        default=settings.SQLITE_SYNCHRONOUS,
+        help="SQLite synchronous mode",
     )
     parser.add_argument(
         "--cookies-from-browser",
@@ -1081,262 +854,181 @@ def main():
         default=None,
         help="Load cookies directly from your browser via browser_cookie3",
     )
+    parser.add_argument("--filter", help="Only process companies matching this filter")
     args = parser.parse_args()
-    # Override defaults
-    global COMPANIES, NUM_WORKERS, db_write_semaphore, FULL_COOKIE, X_CSRF_TOKEN, UUUSERID
-    COMPANIES = json.load(open(args.companies_file))
-    NUM_WORKERS = args.workers
-    db_write_semaphore = threading.Semaphore(args.db_concurrency)
+
+    # Set up logging with our enhanced utility
+    util.setup_logging(
+        level=settings.LOG_LEVEL, log_file=args.log_file, rich_output=not args.no_rich
+    )
+
+    logger = logging.getLogger(__name__)
+    logger.info("LeetCode Company Data Fetcher starting")
+
+    # Update settings based on args
+    if args.sync_mode != settings.SQLITE_SYNCHRONOUS:
+        settings.SQLITE_SYNCHRONOUS = args.sync_mode
+        logger.info(f"Overriding SQLite synchronous mode to: {args.sync_mode}")
+
     # Optionally load cookies from browser
     if args.cookies_from_browser:
-        # Pull cookie jar directly from browser
-        full_cookie = util.load_cookies_from_browser(
-            browser=args.cookies_from_browser, domain="leetcode.com"
+        try:
+            logger.info(
+                f"Attempting to load cookies from {args.cookies_from_browser}..."
+            )
+            loaded_cookie = util.load_cookies_from_browser(
+                browser=args.cookies_from_browser, domain="leetcode.com"
+            )
+
+            # Only proceed if cookies were actually loaded
+            if loaded_cookie:
+                settings.FULL_COOKIE = loaded_cookie
+
+                # Re-extract CSRF and UUUSERID from loaded cookies
+                settings.X_CSRF_TOKEN = next(
+                    (
+                        t.split("=")[1]
+                        for t in settings.FULL_COOKIE.split("; ")
+                        if t.startswith("csrftoken=")
+                    ),
+                    "",
+                )
+                settings.UUUSERID = next(
+                    (
+                        t.split("=")[1]
+                        for t in settings.FULL_COOKIE.split("; ")
+                        if t.startswith("uuuserid=")
+                    ),
+                    "",
+                )
+                logger.info("Successfully loaded and configured cookies from browser.")
+            else:
+                logger.warning(
+                    "Failed to load cookies from browser or no cookies found."
+                )
+                # Continue without browser cookies, rely on env var or empty string
+
+        except Exception as e:
+            # Catch any unexpected error during the loading process itself
+            logger.error(
+                f"Unexpected error during cookie loading from {args.cookies_from_browser}: {e}"
+            )
+            # Potentially return 1 here if cookies are critical
+            # return 1
+
+    # Use custom global for DB concurrency to avoid import order issues
+    global db_write_semaphore
+    if args.db_concurrency != DB_WRITE_CONCURRENCY:
+        db_write_semaphore = threading.Semaphore(args.db_concurrency)
+
+    # Display configuration summary
+    settings.print_config_summary()
+
+    # Load company data
+    try:
+        with open(args.companies_file, "r") as f:
+            all_companies_data = json.load(f)
+            logger.info(
+                f"Loaded {len(all_companies_data)} companies from {args.companies_file}"
+            )
+    except (json.JSONDecodeError, FileNotFoundError) as e:
+        logger.error(f"Failed to load companies file: {e}")
+        return 1
+
+    # Filter companies if requested
+    if args.filter:
+        all_companies_data = [
+            c for c in all_companies_data if args.filter.lower() in c["slug"].lower()
+        ]
+        logger.info(
+            f"Filtered to {len(all_companies_data)} companies matching '{args.filter}'"
         )
-        FULL_COOKIE = full_cookie
-        # Re-extract CSRF and UUUSERID from loaded cookies
-        tokens = [t for t in FULL_COOKIE.split("; ") if t.startswith("csrftoken=")]
-        if tokens:
-            X_CSRF_TOKEN = tokens[0].split("=")[1]
-        tokens = [t for t in FULL_COOKIE.split("; ") if t.startswith("uuuserid=")]
-        if tokens:
-            UUUSERID = tokens[0].split("=")[1]
-        # Update headers map
-        BASE_HEADERS["cookie"] = FULL_COOKIE
-        BASE_HEADERS["x-csrftoken"] = X_CSRF_TOKEN
-        BASE_HEADERS["uuuserid"] = UUUSERID
-    start_time = time.time()
 
-    # Setup logging
-    setup_logging()
-    logging.info("Starting LeetCode data fetch...")
+    if not all_companies_data:
+        logger.error("No companies to process. Exiting.")
+        return 1
 
-    # Initialize database connection
-    logging.info("Initializing Database...")
+    # Create a queue of companies to process
+    company_queue = queue.Queue()
+    for company_slug in all_companies_data:  # Iterate directly over the list of slugs
+        company_queue.put(company_slug)
 
-    # Check if database is locked before proceeding
+    # Create and start worker threads
+    threads = []
+    for i in range(min(args.workers, len(all_companies_data))):
+        thread = threading.Thread(
+            target=process_company_worker,
+            args=(company_queue,),
+            name=f"Worker-{i+1}",
+            daemon=True,  # Allow program to exit if these threads are still running
+        )
+        threads.append(thread)
+        thread.start()
+
+    # Wait for all work to be completed or for graceful shutdown
     try:
-        import subprocess
-
-        result = subprocess.run(["lsof", DB_FILE], capture_output=True, text=True)
-        if result.stdout.strip():
-            logging.error(
-                f"Database is locked by another process! Output of lsof:\n{result.stdout}"
+        # Wait for the queue to be empty
+        while not company_queue.empty():
+            logger.info(
+                f"Progress: {len(successful_companies) + len(failed_companies)}/{len(all_companies_data)} companies processed"
             )
-            logging.info(
-                "Please terminate the processes locking the database and try again."
-            )
-            return False
-    except Exception as e:
-        logging.warning(f"Failed to check if database is locked: {e}")
 
-    conn = None
-    try:
-        conn = db_utils.connect_db()
-        global processed_companies, failed_companies_api, failed_companies_db, total_problems_processed, total_categories_processed
+            # Check if all workers have died unexpectedly
+            active_workers = sum(1 for t in threads if t.is_alive())
+            if active_workers == 0:
+                logger.error("All worker threads have died. Exiting.")
+                return 1
 
-        # Reset counters
-        processed_companies = 0
-        failed_companies_api = 0
-        failed_companies_db = 0
-        total_problems_processed = 0
-        total_categories_processed = 0
-        # Clear DLQ if running multiple times in one session ( unlikely here)
-        while not dlq.empty():
-            try:
-                dlq.get_nowait()
-            except queue.Empty:
+            # Sleep briefly before checking again
+            time.sleep(5)
+
+            # Exit early if shutdown requested
+            if util.shutdown_requested():
+                logger.warning(
+                    "Shutdown requested. Waiting for workers to finish current tasks..."
+                )
                 break
 
-        # Create queue of companies to process
-        company_queue = queue.Queue()
-        for company_slug in COMPANIES:
-            company_queue.put(company_slug)
-
-        total_companies = len(COMPANIES)
-        _log(
-            f"Starting {NUM_WORKERS} worker threads to process {total_companies} companies..."
-        )
-
-        # Start worker threads
-        threads = []
-        for i in range(
-            min(NUM_WORKERS, total_companies)
-        ):  # Don't create more threads than companies
-            thread = threading.Thread(
-                target=process_company_worker,
-                args=(company_queue,),
-                name=f"Worker-{i+1}",
+        # If we're still running (not shutting down), wait for all tasks to complete
+        if not util.shutdown_requested():
+            logger.info(
+                "All companies added to queue. Waiting for processing to complete..."
             )
-            thread.daemon = True
-            thread.start()
-            threads.append(thread)
+            company_queue.join()
 
-        # Wait for all tasks to be processed
-        company_queue.join()
-        _log("All companies processed by workers.")
+    except KeyboardInterrupt:
+        logger.warning("Received keyboard interrupt. Starting graceful shutdown...")
+        # The shutdown handler registered in util will set the shutdown flag
 
-    except Exception as e:
-        _log(
-            f"An unexpected error occurred in main loop: {e}",
-            level="ERROR",
-            stream=sys.stderr,
-        )
-
-    finally:
-        end_time = time.time()
-        duration = end_time - start_time
-
-        _log("-" * 20)
-        _log(f"✅ Finished processing.")
-        _log(f"   Successfully processed data for: {processed_companies} companies.")
-        _log(f"   Total categories processed: {total_categories_processed}")
-        _log(f"   Total problems processed: {total_problems_processed}")
-
-        if failed_companies_api > 0:
-            _log(
-                f"   ⚠️ API/Logic Failures: {failed_companies_api} companies encountered non-DB errors (check logs above).",
-                level="WARN",
+    # Wait for active threads to finish (with timeout)
+    wait_start = time.time()
+    while util.get_active_thread_count() > 0:
+        if time.time() - wait_start > 30:  # 30 second max wait
+            logger.warning(
+                f"Timeout waiting for {util.get_active_thread_count()} threads to exit"
             )
-        if failed_companies_db > 0:
-            _log(
-                f"   🔥 Critical DB Failures: {failed_companies_db} companies had critical DB errors after retries (see DLQ).",
-                level="ERROR",
-            )
+            break
+        time.sleep(0.5)
 
-        # Check if there were any errors in the DLQ and print them
-        if not dlq.empty():
-            _log("\n" + "=" * 50, level="ERROR", stream=sys.stderr)
-            _log(
-                "ERRORS ENCOUNTERED DURING EXECUTION:", level="ERROR", stream=sys.stderr
-            )
-            _log("=" * 50, level="ERROR", stream=sys.stderr)
-            error_count = 0
+    # Print summary
+    success_count = len(successful_companies)
+    fail_count = len(failed_companies)
 
-            # Group errors by type for better readability
-            error_types = {}
+    logger.info("=" * 60)
+    logger.info("📊 SUMMARY:")
+    logger.info(f"  Total companies: {len(all_companies_data)}")
+    logger.info(f"  Successfully processed: {success_count}")
+    logger.info(f"  Failed: {fail_count}")
 
-            while not dlq.empty():
-                error = dlq.get()
-                error_type = error.get("type", "unknown")
+    if failed_companies:
+        logger.warning(f"  Failed companies: {', '.join(sorted(failed_companies))}")
 
-                if error_type not in error_types:
-                    error_types[error_type] = []
-
-                error_types[error_type].append(error)
-                error_count += 1
-
-            # Print errors by type with detailed information
-            for error_type, errors in error_types.items():
-                _log(
-                    f"\n{error_type.upper()} ERRORS ({len(errors)}):",
-                    level="ERROR",
-                    stream=sys.stderr,
-                )
-                _log("-" * 50, level="ERROR", stream=sys.stderr)
-
-                for i, error in enumerate(errors, 1):
-                    timestamp = error.get("timestamp", "unknown time")
-                    worker = error.get("worker", "unknown worker")
-                    error_msg = error.get("error", "No error message")
-
-                    # Build detailed entry based on error type
-                    if error_type == "company_api":
-                        company = error.get("company", "unknown")
-                        _log(
-                            f"{i}. [TIME: {timestamp}] [WORKER: {worker}] Company: {company}",
-                            level="ERROR",
-                            stream=sys.stderr,
-                        )
-                        _log(f"   Error: {error_msg}", level="ERROR", stream=sys.stderr)
-
-                    elif error_type == "company_id" or error_type == "company_commit":
-                        company = error.get("slug", "unknown")
-                        _log(
-                            f"{i}. [TIME: {timestamp}] [WORKER: {worker}] Company: {company}",
-                            level="ERROR",
-                            stream=sys.stderr,
-                        )
-                        _log(f"   Error: {error_msg}", level="ERROR", stream=sys.stderr)
-
-                    elif error_type == "category_id":
-                        company = error.get("company", "unknown")
-                        category = error.get("category", "unknown")
-                        _log(
-                            f"{i}. [TIME: {timestamp}] [WORKER: {worker}] Company: {company}, Category: {category}",
-                            level="ERROR",
-                            stream=sys.stderr,
-                        )
-                        _log(f"   Error: {error_msg}", level="ERROR", stream=sys.stderr)
-
-                    elif error_type == "problem_id":
-                        company = error.get("company", "unknown")
-                        category = error.get("category", "unknown")
-                        problem = error.get("problem", "unknown")
-                        _log(
-                            f"{i}. [TIME: {timestamp}] [WORKER: {worker}] Company: {company}, Category: {category}, Problem: {problem}",
-                            level="ERROR",
-                            stream=sys.stderr,
-                        )
-                        _log(f"   Error: {error_msg}", level="ERROR", stream=sys.stderr)
-
-                    else:
-                        # Generic fallback for unknown error types
-                        _log(
-                            f"{i}. [TIME: {timestamp}] [WORKER: {worker}]",
-                            level="ERROR",
-                            stream=sys.stderr,
-                        )
-                        _log(
-                            f"   Error details: {error}",
-                            level="ERROR",
-                            stream=sys.stderr,
-                        )
-
-            _log("\n" + "=" * 50, level="ERROR", stream=sys.stderr)
-            _log(f"TOTAL ERRORS: {error_count}", level="ERROR", stream=sys.stderr)
-            _log("=" * 50 + "\n", level="ERROR", stream=sys.stderr)
-        elif failed_companies_db == 0 and failed_companies_api == 0:
-            _log("   ✨ No companies failed.")
-
-        _log(f"   Total time: {duration:.2f} seconds")
-        _log(f"   Workers: {NUM_WORKERS}")
-
-    # At the end of main:
-    if conn:
-        db_utils.close_connection(conn)
-        _log("Database connection closed")
-
-    return True
+    return 0 if fail_count == 0 else 1
 
 
 if __name__ == "__main__":
-    # Check if companies.json exists
     try:
-        with open("companies.json", "r") as f:
-            COMPANIES = json.load(f)
-        if not isinstance(COMPANIES, list) or not all(
-            isinstance(c, str) for c in COMPANIES
-        ):
-            _log(
-                "Error: companies.json should contain a JSON list of strings.",
-                level="ERROR",
-                stream=sys.stderr,
-            )
-            sys.exit(1)
-    except FileNotFoundError:
-        _log(
-            "Error: companies.json not found in the current directory.",
-            level="ERROR",
-            stream=sys.stderr,
-        )
+        sys.exit(main())
+    except Exception as e:
+        logging.exception(f"Unhandled exception in main: {e}")
         sys.exit(1)
-    except json.JSONDecodeError:
-        _log(
-            "Error: Could not decode JSON from companies.json.",
-            level="ERROR",
-            stream=sys.stderr,
-        )
-        sys.exit(1)
-
-    main()

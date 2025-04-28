@@ -8,9 +8,9 @@ import json
 import time
 import random
 import os
+from settings import DB_FILE, get_sqlite_pragmas
 
 # --- CONFIG ---
-DB_FILE = "leetcode_data.sqlite"
 DB_LOCK_MAX_RETRIES = 5  # Max attempts to retry a locked database operation
 DB_LOCK_RETRY_DELAY_MIN = 0.1  # Min seconds to wait before retry
 DB_LOCK_RETRY_DELAY_MAX = 0.5  # Max seconds to wait before retry
@@ -57,7 +57,7 @@ def get_db_connection():
 
         # Enable WAL mode for better concurrency
         conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA synchronous = NORMAL;")
+        conn.execute("PRAGMA synchronous = OFF;")
 
         # conn.execute(f'PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_MS}') # Alternative way to set timeout
         return conn
@@ -484,11 +484,42 @@ def get_or_create_id(conn, table, unique_column, value, other_columns=None):
 
             sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(placeholders)})"
 
-            # Use direct cursor execution instead of _execute_write to safely access lastrowid
+            # Attempt to insert with retry on database lock
             cursor = conn.cursor()
-            cursor.execute(sql, tuple(insert_values))
-            new_id = cursor.lastrowid
-            return new_id
+            retries = 0
+            while retries < DB_LOCK_MAX_RETRIES:
+                try:
+                    cursor.execute(sql, tuple(insert_values))
+                    new_id = cursor.lastrowid
+                    try:
+                        conn.commit()  # Commit immediately to release locks
+                    except sqlite3.Error:
+                        pass
+                    return new_id
+                except sqlite3.OperationalError as e:
+                    if "database is locked" in str(e).lower():
+                        retries += 1
+                        delay = random.uniform(
+                            DB_LOCK_RETRY_DELAY_MIN, DB_LOCK_RETRY_DELAY_MAX
+                        )
+                        _log(
+                            f"DB locked during insert for {table} ({unique_column}={value}), retry {retries}/{DB_LOCK_MAX_RETRIES} after {delay:.3f}s",
+                            level="DB WARN",
+                            stream=sys.stderr,
+                            thread_name=thread_name,
+                        )
+                        time.sleep(delay)
+                        continue
+                    else:
+                        raise
+            # If we get here, all retries failed
+            _log(
+                f"Failed to insert {table} ({unique_column}={value}) after {DB_LOCK_MAX_RETRIES} retries due to lock.",
+                level="DB ERROR",
+                stream=sys.stderr,
+                thread_name=thread_name,
+            )
+            return None
 
     except sqlite3.IntegrityError as e:
         # This usually means another thread inserted between our SELECT and INSERT (race condition)
@@ -842,7 +873,8 @@ def batch_get_or_create_problems(conn, problems_data):
                 cursor = conn.cursor()
                 cursor.execute(
                     "INSERT INTO Problems (title_slug, title, difficulty, ac_rate, is_paid_only, question_frontend_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT(title_slug) DO UPDATE SET title=excluded.title, difficulty=excluded.difficulty, ac_rate=excluded.ac_rate, is_paid_only=excluded.is_paid_only, question_frontend_id=excluded.question_frontend_id",
                     (
                         slug,
                         title,
@@ -852,8 +884,15 @@ def batch_get_or_create_problems(conn, problems_data):
                         question_frontend_id,
                     ),
                 )
-                problem_id = cursor.lastrowid
-                result_map[slug] = problem_id
+                # Fetch the problem_id for both new and existing records
+                row = cursor.execute(
+                    "SELECT problem_id FROM Problems WHERE title_slug = ?", (slug,)
+                ).fetchone()
+                result_map[slug] = (
+                    row["problem_id"]
+                    if row and "problem_id" in row.keys()
+                    else (row[0] if row else None)
+                )
 
     except sqlite3.Error as e:
         _log(
@@ -902,8 +941,10 @@ def batch_update_problem_details(conn, problems_data):
     ]
 
     try:
-        # Start a transaction
-        conn.execute("BEGIN TRANSACTION")
+        # Begin transaction only if none active
+        outer = conn.in_transaction
+        if not outer:
+            conn.execute("BEGIN TRANSACTION")
 
         updated = 0
         for problem in problems_data:
@@ -942,8 +983,9 @@ def batch_update_problem_details(conn, problems_data):
                 if cursor.rowcount > 0:
                     updated += 1
 
-        # Commit all updates in one go
-        conn.commit()
+        # Commit only if we began it
+        if not outer:
+            conn.commit()
         return updated
 
     except Exception as e:
@@ -1018,34 +1060,22 @@ def connect_db(db_file=DB_FILE, timeout=10.0, thread_name=None):
 
 
 def set_sqlite_pragmas(conn):
-    """Set SQLite PRAGMAs for better performance and concurrency"""
+    """
+    Set SQLite PRAGMAs for optimal performance with the current workload.
+
+    Args:
+        conn (sqlite3.Connection): The SQLite connection to configure
+
+    Returns:
+        bool: True if successful, False if an error occurred
+    """
     try:
-        # Enable WAL mode for better concurrency
-        conn.execute("PRAGMA journal_mode = WAL")
+        # Get pragmas from settings
+        pragmas = get_sqlite_pragmas()
 
-        # Set an even longer busy_timeout (30 seconds)
-        conn.execute("PRAGMA busy_timeout = 30000")
-
-        # Other performance optimizations
-        conn.execute(
-            "PRAGMA synchronous = NORMAL"
-        )  # Safer than OFF but faster than FULL
-        conn.execute("PRAGMA cache_size = 20000")  # Increase cache size further
-        conn.execute("PRAGMA temp_store = MEMORY")  # Store temp tables in memory
-        conn.execute(
-            "PRAGMA mmap_size = 67108864"
-        )  # Use 64MB memory mapping for faster access
-
-        # Increase page size for better performance
-        conn.execute("PRAGMA page_size = 8192")  # 8KB pages (from default 4KB)
-
-        # Locking mode settings
-        conn.execute("PRAGMA locking_mode = NORMAL")  # Allow concurrent reads
-
-        # WAL autocheckpoint (default is 1000)
-        conn.execute(
-            "PRAGMA wal_autocheckpoint = 2000"
-        )  # More pages between checkpoints
+        # Apply each pragma
+        for pragma_name, pragma_value in pragmas.items():
+            conn.execute(f"PRAGMA {pragma_name} = {pragma_value}")
 
         return True
     except sqlite3.Error as e:
@@ -1084,8 +1114,10 @@ def batch_get_or_create_categories(conn, categories_data):
     slug_list = ",".join(["?"] * len(slugs))
 
     try:
-        # Start a transaction
-        conn.execute("BEGIN TRANSACTION")
+        # Begin transaction only if none active
+        outer = conn.in_transaction
+        if not outer:
+            conn.execute("BEGIN TRANSACTION")
 
         cursor = conn.cursor()
         cursor.execute(
@@ -1101,20 +1133,26 @@ def batch_get_or_create_categories(conn, categories_data):
         to_insert = [c for c in categories_data if c["slug"] not in existing]
 
         if to_insert:
-            # Insert new categories
+            # Upsert categories: insert new or update name on conflict
             for category in to_insert:
                 slug = category["slug"]
                 name = category.get("name", slug)
 
                 cursor = conn.cursor()
                 cursor.execute(
-                    "INSERT INTO Categories (slug, name) VALUES (?, ?)", (slug, name)
+                    "INSERT INTO Categories (slug, name) VALUES (?, ?) "
+                    "ON CONFLICT(slug) DO UPDATE SET name=excluded.name",
+                    (slug, name),
                 )
-                category_id = cursor.lastrowid
-                result_map[slug] = category_id
+                # Fetch the category_id whether inserted or updated
+                row = cursor.execute(
+                    "SELECT category_id FROM Categories WHERE slug = ?", (slug,)
+                ).fetchone()
+                result_map[slug] = row["category_id"] if row else None
 
-        # Commit the transaction
-        conn.commit()
+        # Commit only if we began it
+        if not outer:
+            conn.commit()
         return result_map
 
     except sqlite3.Error as e:
@@ -1178,10 +1216,12 @@ def batch_insert_junctions(conn, table, items):
     if not columns:
         return 0
 
-    # Start transaction
-    try:
+    # Begin transaction only if none active
+    outer = conn.in_transaction
+    if not outer:
         conn.execute("BEGIN TRANSACTION")
 
+    try:
         # Prepare SQL
         placeholders = ",".join(["?"] * len(columns))
         column_names = ",".join(columns)
@@ -1189,14 +1229,13 @@ def batch_insert_junctions(conn, table, items):
 
         # Execute batch
         cursor = conn.cursor()
-        count = 0
+        values_list = [tuple(item.get(col) for col in columns) for item in items]
+        cursor.executemany(sql, values_list)
+        count = len(values_list)
 
-        for item in items:
-            values = [item.get(col) for col in columns]
-            cursor.execute(sql, values)
-            count += 1
-
-        conn.commit()
+        # Commit only if we began it
+        if not outer:
+            conn.commit()
         return count
 
     except sqlite3.Error as e:
@@ -1257,8 +1296,10 @@ def batch_get_or_create_tags(conn, tags_data):
     slug_list = ",".join(["?"] * len(slugs))
 
     try:
-        # Start a transaction
-        conn.execute("BEGIN TRANSACTION")
+        # Begin transaction only if none active
+        outer = conn.in_transaction
+        if not outer:
+            conn.execute("BEGIN TRANSACTION")
 
         cursor = conn.cursor()
         cursor.execute(
@@ -1274,7 +1315,7 @@ def batch_get_or_create_tags(conn, tags_data):
         to_insert = [t for t in tags_data if t["slug"] not in existing]
 
         if to_insert:
-            # Insert new tags
+            # Upsert tags: insert new or update on slug conflict
             for tag in to_insert:
                 slug = tag["slug"]
                 name = tag.get("name", slug)
@@ -1282,14 +1323,23 @@ def batch_get_or_create_tags(conn, tags_data):
 
                 cursor = conn.cursor()
                 cursor.execute(
-                    "INSERT INTO Tags (slug, name, translated_name) VALUES (?, ?, ?)",
+                    "INSERT INTO Tags (slug, name, translated_name) VALUES (?, ?, ?) "
+                    "ON CONFLICT(slug) DO UPDATE SET name=excluded.name, translated_name=excluded.translated_name",
                     (slug, name, translated_name),
                 )
-                tag_id = cursor.lastrowid
-                result_map[slug] = tag_id
+                # Fetch the tag_id for both new and existing records
+                row = cursor.execute(
+                    "SELECT tag_id FROM Tags WHERE slug = ?", (slug,)
+                ).fetchone()
+                result_map[slug] = (
+                    row["tag_id"]
+                    if row and "tag_id" in row.keys()
+                    else (row[0] if row else None)
+                )
 
-        # Commit the transaction
-        conn.commit()
+        # Commit only if we began it
+        if not outer:
+            conn.commit()
         return result_map
 
     except sqlite3.Error as e:
@@ -1392,6 +1442,81 @@ def batch_update_timestamps(
             thread_name=thread_name,
         )
         return 0
+
+
+def batch_update_problem_company_frequencies(conn, frequency_data):
+    """Updates frequencies for multiple problem-company pairs in a batch.
+
+    Args:
+        conn: Database connection
+        frequency_data: List of dictionaries containing problem_id, company_id, and frequency
+
+    Returns:
+        Number of pairs successfully updated
+    """
+    thread_name = None
+    try:
+        import threading
+
+        thread_name = threading.current_thread().name
+    except:
+        pass
+
+    if not frequency_data:
+        return 0
+
+    # Use executemany for better performance
+    sql = "UPDATE ProblemCompanies SET frequency = ? WHERE problem_id = ? AND company_id = ?"
+
+    # Prepare values list for executemany
+    values_list = [
+        (item["frequency"], item["problem_id"], item["company_id"])
+        for item in frequency_data
+    ]
+
+    try:
+        # In-transaction check (avoid nested transactions)
+        outer = conn.in_transaction
+        if not outer:
+            conn.execute("BEGIN TRANSACTION")
+
+        cursor = conn.cursor()
+        cursor.executemany(sql, values_list)
+        updated = cursor.rowcount
+
+        if not outer:
+            conn.commit()
+
+        return updated
+
+    except sqlite3.Error as e:
+        try:
+            if not outer:
+                conn.rollback()
+        except:
+            pass
+
+        _log(
+            f"Batch frequency update failed:\n"
+            f"Error: {e}\n"
+            f"Number of items: {len(frequency_data)}",
+            level="DB ERROR",
+            stream=sys.stderr,
+            thread_name=thread_name,
+        )
+
+        # Fall back to individual updates if batch fails
+        updated = 0
+        for item in frequency_data:
+            try:
+                if update_problem_company_frequency(
+                    conn, item["problem_id"], item["company_id"], item["frequency"]
+                ):
+                    updated += 1
+            except Exception:
+                pass
+
+        return updated
 
 
 # --- Main execution --- (for standalone testing/init)
